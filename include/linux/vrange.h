@@ -11,6 +11,7 @@ static DECLARE_RWSEM(vrange_fork_lock);
 struct vrange {
 	struct interval_tree_node node;
 	bool purged;
+	struct mm_struct *mm;
 };
 
 #define vrange_entry(ptr) \

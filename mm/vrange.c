@@ -29,8 +29,9 @@ static inline void __set_vrange(struct vrange *range,
 }
 
 static void __add_range(struct vrange *range,
-				struct rb_root *root)
+			struct rb_root *root, struct mm_struct *mm)
 {
+	range->mm = mm;
 	interval_tree_insert(&range->node, root);
 }
 
@@ -52,11 +53,12 @@ static void free_vrange(struct vrange *range)
 
 static inline void range_resize(struct rb_root *root,
 		struct vrange *range,
-		unsigned long start, unsigned long end)
+		unsigned long start, unsigned long end,
+		struct mm_struct *mm)
 {
 	__remove_range(range, root);
 	__set_vrange(range, start, end);
-	__add_range(range, root);
+	__add_range(range, root, mm);
 }
 
 int add_vrange(struct mm_struct *mm,
@@ -95,8 +97,7 @@ int add_vrange(struct mm_struct *mm,
 
 	__set_vrange(new_range, start, end);
 	new_range->purged = purged;
-
-	__add_range(new_range, root);
+	__add_range(new_range, root, mm);
 out:
 	vrange_unlock(mm);
 	return 0;
@@ -129,15 +130,16 @@ int remove_vrange(struct mm_struct *mm,
 			__remove_range(range, root);
 			free_vrange(range);
 		} else if (node->start >= start) {
-			range_resize(root, range, end, node->last);
+			range_resize(root, range, end, node->last, mm);
 		} else if (node->last <= end) {
-			range_resize(root, range, node->start, start);
+			range_resize(root, range, node->start, start, mm);
 		} else {
 			used_new = true;
 			__set_vrange(new_range, end, node->last);
 			new_range->purged = range->purged;
-			range_resize(root, range, node->start, start);
-			__add_range(new_range, root);
+			new_range->mm = mm;
+			range_resize(root, range, node->start, start, mm);
+			__add_range(new_range, root, mm);
 			break;
 		}
 
