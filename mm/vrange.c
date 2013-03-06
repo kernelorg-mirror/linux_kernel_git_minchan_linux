@@ -518,6 +518,10 @@ int discard_vpage(struct page *page)
 		if (page_freeze_refs(page, 1)) {
 			unlock_page(page);
 			dec_zone_page_state(page, NR_ISOLATED_ANON);
+			if (current_is_kswapd())
+				count_vm_event(PGDISCARD_KSWAPD);
+			else
+				count_vm_event(PGDISCARD_DIRECT);
 			return 1;
 		}
 	}
@@ -584,11 +588,15 @@ static int vrange_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 {
 	pte_t *pte;
 	spinlock_t *ptl;
+	unsigned long start = addr;
 
 	pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
 	for (; addr != end; pte++, addr += PAGE_SIZE)
 		vrange_pte_entry(*pte, addr, PAGE_SIZE, walk);
 	pte_unmap_unlock(pte - 1, ptl);
+
+	count_vm_events(PG_VRANGE_SCAN, (end - start) / PAGE_SIZE);
+
 	cond_resched();
 	return 0;
 
@@ -741,5 +749,6 @@ unsigned int discard_vrange_pages(struct zone *zone, int nr_to_discard)
 	if (start_vrange)
 		put_victim_range(start_vrange);
 
+	count_vm_events(PG_VRANGE_DISCARD, nr_discarded);
 	return nr_discarded;
 }
