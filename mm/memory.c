@@ -3671,6 +3671,7 @@ anon:
 
 		if (unlikely(pte_vrange(entry))) {
 			if (!is_purged_vrange(mm, address)) {
+				lru_move_vrange_to_head(mm, address);
 				/* zap pte */
 				ptl = pte_lockptr(mm, pmd);
 				spin_lock(ptl);

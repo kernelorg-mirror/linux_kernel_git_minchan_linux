@@ -14,6 +14,9 @@
 #include <linux/swapops.h>
 #include <linux/mmu_notifier.h>
 
+static LIST_HEAD(lru_vrange);
+static DEFINE_SPINLOCK(lru_lock);
+
 static struct kmem_cache *vrange_cachep;
 
 void __init vrange_init(void)
@@ -28,10 +31,50 @@ static inline void __set_vrange(struct vrange *range,
 	range->node.last = end_idx;
 }
 
+void lru_add_vrange(struct vrange *vrange)
+{
+	spin_lock(&lru_lock);
+	WARN_ON(!list_empty(&vrange->lru));
+	list_add(&vrange->lru, &lru_vrange);
+	spin_unlock(&lru_lock);
+}
+
+void lru_remove_vrange(struct vrange *vrange)
+{
+	spin_lock(&lru_lock);
+	if (!list_empty(&vrange->lru))
+		list_del_init(&vrange->lru);
+	spin_unlock(&lru_lock);
+}
+
+void lru_move_vrange_to_head(struct mm_struct *mm, unsigned long address)
+{
+	struct rb_root *root = &mm->v_rb;
+	struct interval_tree_node *node;
+	struct vrange *vrange;
+
+	vrange_lock(mm);
+	node = interval_tree_iter_first(root, address, address + PAGE_SIZE - 1);
+	if (node) {
+		vrange = container_of(node, struct vrange, node);
+		spin_lock(&lru_lock);
+		/*
+		 * Race happens with get_victim_vrange so in such case,
+		 * we can't move but it can put the vrange into head
+		 * after finishing purging work so no problem.
+		 */
+		if (!list_empty(&vrange->lru))
+			list_move(&vrange->lru, &lru_vrange);
+		spin_unlock(&lru_lock);
+	}
+	vrange_unlock(mm);
+}
+
 static void __add_range(struct vrange *range,
 			struct rb_root *root, struct mm_struct *mm)
 {
 	range->mm = mm;
+	lru_add_vrange(range);
 	interval_tree_insert(&range->node, root);
 }
 
@@ -43,11 +86,14 @@ static void __remove_range(struct vrange *range,
 
 static struct vrange *alloc_vrange(void)
 {
-	return kmem_cache_alloc(vrange_cachep, GFP_KERNEL);
+	struct vrange *vrange = kmem_cache_alloc(vrange_cachep, GFP_KERNEL);
+	INIT_LIST_HEAD(&vrange->lru);
+	return vrange;
 }
 
 static void free_vrange(struct vrange *range)
 {
+	lru_remove_vrange(range);
 	kmem_cache_free(vrange_cachep, range);
 }
 

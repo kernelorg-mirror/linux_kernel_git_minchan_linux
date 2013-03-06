@@ -12,6 +12,7 @@ struct vrange {
 	struct interval_tree_node node;
 	bool purged;
 	struct mm_struct *mm;
+	struct list_head lru; /* protected by lru_lock */
 };
 
 #define vrange_entry(ptr) \
@@ -43,6 +44,9 @@ bool vrange_address(struct mm_struct *mm, unsigned long start,
 			unsigned long end);
 
 extern bool is_purged_vrange(struct mm_struct *mm, unsigned long address);
+
+unsigned int discard_vrange_pages(struct zone *zone, int nr_to_discard);
+void lru_move_vrange_to_head(struct mm_struct *mm, unsigned long address);
 
 #else
 
