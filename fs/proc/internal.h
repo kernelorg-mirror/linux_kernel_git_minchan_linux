@@ -60,6 +60,7 @@ extern loff_t mem_lseek(struct file *file, loff_t offset, int orig);
 
 extern const struct file_operations proc_tid_children_operations;
 extern const struct file_operations proc_pid_maps_operations;
+extern const struct file_operations proc_pid_vrange_operations;
 extern const struct file_operations proc_tid_maps_operations;
 extern const struct file_operations proc_pid_numa_maps_operations;
 extern const struct file_operations proc_tid_numa_maps_operations;
@@ -80,6 +81,11 @@ struct proc_maps_private {
 #ifdef CONFIG_NUMA
 	struct mempolicy *task_mempolicy;
 #endif
+};
+
+struct proc_vrange_private {
+	struct pid *pid;
+	struct task_struct *task;
 };
 
 void proc_init_inodecache(void);

@@ -199,7 +199,7 @@ SYSCALL_DEFINE4(vrange, unsigned long, start,
 	if (!len)
 		goto out;
 
-	end = start  len;
+	end = start + len;
 	if (end < start)
 		goto out;
 

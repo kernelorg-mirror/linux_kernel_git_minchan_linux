@@ -11,6 +11,7 @@
 #include <linux/rmap.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
+#include <linux/vrange.h>
 
 #include <asm/elf.h>
 #include <asm/uaccess.h>
@@ -369,6 +370,134 @@ static int show_tid_map(struct seq_file *m, void *v)
 {
 	return show_map(m, v, 0);
 }
+
+static void *v_start(struct seq_file *m, loff_t *pos)
+{
+	struct vrange *range;
+	struct mm_struct *mm;
+	struct rb_root *root;
+	struct rb_node *next;
+	struct proc_vrange_private *priv = m->private;
+	loff_t n = *pos;
+
+	/* Clear the per syscall fields in priv */
+	priv->task = NULL;
+
+	priv->task = get_pid_task(priv->pid, PIDTYPE_PID);
+	if (!priv->task)
+		return ERR_PTR(-ESRCH);
+
+	mm = mm_access(priv->task, PTRACE_MODE_READ);
+	if (!mm || IS_ERR(mm))
+		return mm;
+
+	vrange_lock(mm);
+	root = &mm->v_rb;
+
+	if (RB_EMPTY_ROOT(&mm->v_rb))
+		goto out;
+
+	next = rb_first(&mm->v_rb);
+	range = vrange_entry(next);
+	while(n > 0 && range) {
+		n--;
+		next = rb_next(next);
+		if (next)
+			range = vrange_entry(next);
+		else
+			range = NULL;
+	}
+	if (!n)
+		return range;
+out:
+	return NULL;
+}
+
+static void *v_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	struct vrange *range = v;
+	struct rb_node *next;
+
+	(*pos)++;
+	next = rb_next(&range->node.rb);
+	if (next) {
+		range = vrange_entry(next);
+		return range;
+	}
+	return NULL;
+}
+
+static void v_stop(struct seq_file *m, void *v)
+{
+	struct proc_vrange_private *priv = m->private;
+	if (priv->task) {
+		struct mm_struct *mm = priv->task->mm;
+		vrange_unlock(mm);
+		mmput(mm);
+		put_task_struct(priv->task);
+	}
+}
+
+static int show_vrange(struct seq_file *m, void *v, int is_pid)
+{
+
+	unsigned long start, end;
+	bool purged;
+	struct vrange *range = v;
+
+	start = range->node.start;
+	end = range->node.last;
+	purged = range->purged;
+
+	seq_printf(m, "%08lx-%08lx %c\n",
+			start,
+			end,
+			purged ? 'p' : 'v');
+	return 0;
+}
+
+static int show_vrange_map(struct seq_file *m, void *v)
+{
+	return show_vrange(m, v, 1);
+}
+
+static const struct seq_operations proc_pid_vrange_op = {
+	.start	= v_start,
+	.next	= v_next,
+	.stop	= v_stop,
+	.show	= show_vrange_map
+};
+
+static int do_vrange_open(struct inode *inode, struct file *file,
+		const struct seq_operations *ops)
+{
+	struct proc_vrange_private *priv;
+	int ret = -ENOMEM;
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (priv) {
+		priv->pid = proc_pid(inode);
+		ret = seq_open(file, ops);
+		if (!ret) {
+			struct seq_file *m = file->private_data;
+			m->private = priv;
+		} else {
+			kfree(priv);
+		}
+	}
+	return ret;
+}
+
+static int pid_vrange_open(struct inode *inode, struct file *file)
+{
+	return do_vrange_open(inode, file, &proc_pid_vrange_op);
+}
+
+const struct file_operations proc_pid_vrange_operations = {
+	.open		= pid_vrange_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release_private,
+};
 
 static const struct seq_operations proc_pid_maps_op = {
 	.start	= m_start,
