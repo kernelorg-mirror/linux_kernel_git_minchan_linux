@@ -469,6 +469,17 @@ static inline unsigned long my_zero_pfn(unsigned long addr)
 
 #ifdef CONFIG_MMU
 
+static inline pte_t pte_mkvrange(pte_t pte)
+{
+	pte = pte_set_flags(pte, _PAGE_VRANGE);
+	return pte_clear_flags(pte, _PAGE_PRESENT);
+}
+
+static inline int pte_vrange(pte_t pte)
+{
+	return ((pte_flags(pte) | _PAGE_PRESENT) == _PAGE_VRANGE);
+}
+
 #ifndef CONFIG_TRANSPARENT_HUGEPAGE
 static inline int pmd_trans_huge(pmd_t pmd)
 {

@@ -343,7 +343,9 @@ int try_to_discard_one(struct page *page, struct vm_area_struct *vma,
 
 	present = pte_present(*pte);
 	flush_cache_page(vma, address, page_to_pfn(page));
-	pteval = ptep_clear_flush(vma, address, pte);
+
+	ptep_clear_flush(vma, address, pte);
+	pteval = pte_mkvrange(*pte);
 
 	update_hiwater_rss(mm);
 	dec_mm_counter(mm, MM_ANONPAGES);
@@ -357,10 +359,12 @@ int try_to_discard_one(struct page *page, struct vm_area_struct *vma,
 			BUG_ON(1);
 	}
 
+	set_pte_at(mm, address, pte, pteval);
+	__vrange_purge(mm, address, address + PAGE_SIZE -1);
 	pte_unmap_unlock(pte, ptl);
 	mmu_notifier_invalidate_page(mm, address);
+	vrange_unlock(mm);
 	ret = 1;
-	__vrange_purge(mm, address, address + PAGE_SIZE -1);
 out:
 	return ret;
 }
@@ -447,4 +451,22 @@ int discard_vpage(struct page *page)
 	}
 
 	return 0;
+}
+
+bool is_purged_vrange(struct mm_struct *mm, unsigned long address)
+{
+	struct rb_root *root = &mm->v_rb;
+	struct interval_tree_node *node;
+	struct vrange *range;
+	bool ret = false;
+
+	vrange_lock(mm);
+	node = interval_tree_iter_first(root, address, address + PAGE_SIZE - 1);
+	if (node) {
+		range = container_of(node, struct vrange, node);
+		if (range->purged)
+			ret = true;
+	}
+	vrange_unlock(mm);
+	return ret;
 }

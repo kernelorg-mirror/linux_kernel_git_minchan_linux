@@ -64,6 +64,8 @@
 #define _PAGE_FILE	(_AT(pteval_t, 1) << _PAGE_BIT_FILE)
 #define _PAGE_PROTNONE	(_AT(pteval_t, 1) << _PAGE_BIT_PROTNONE)
 
+#define _PAGE_VRANGE	_PAGE_BIT_PSE
+
 /*
  * _PAGE_NUMA indicates that this page will trigger a numa hinting
  * minor page fault to gather numa placement statistics (see

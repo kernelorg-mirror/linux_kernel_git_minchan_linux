@@ -41,6 +41,8 @@ int discard_vpage(struct page *page);
 bool vrange_address(struct mm_struct *mm, unsigned long start,
 			unsigned long end);
 
+extern bool is_purged_vrange(struct mm_struct *mm, unsigned long address);
+
 #else
 
 static inline void vrange_init(void) {};
