@@ -66,4 +66,9 @@
 #define MAP_HUGE_SHIFT	26
 #define MAP_HUGE_MASK	0x3f
 
+#define VRANGE_VOLATILE	0	/* unpin all pages so VM can discard them */
+#define VRANGE_NOVOLATILE	1	/* pin all pages so VM can't discard them */
+
+#define VRANGE_FULL_MODE	0	/* discard all pages of the range */
+#define VRANGE_PARTIAL_MODE	1	/* discard a few pages of the range */
 #endif /* __ASM_GENERIC_MMAN_COMMON_H */

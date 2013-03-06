@@ -4,6 +4,8 @@
 
 #include <linux/vrange.h>
 #include <linux/slab.h>
+#include <linux/syscalls.h>
+#include <linux/mman.h>
 
 static struct kmem_cache *vrange_cachep;
 
@@ -154,4 +156,60 @@ void exit_vrange(struct mm_struct *mm)
 		__remove_range(range, &mm->v_rb);
 		free_vrange(range);
 	}
+}
+
+/*
+ * The vrange(2) system call.
+ *
+ * Applications can use vrange() to advise the kernel how it should
+ * handle paging I/O in this VM area.  The idea is to help the kernel
+ * discard pages of vrange instead of swapping out when memory pressure
+ * happens. The information provided is advisory only, and can be safely
+ * disregarded by the kernel if system has enough free memory.
+ *
+ * mode values:
+ *  VRANGE_VOLATILE - hint to kernel so VM can discard vrange pages when
+ *		memory pressure happens.
+ *  VRANGE_NOVOLATILE - hint to kernel so VM doesn't discard vrange pages
+ *		any more.
+ * behavior values:
+ *
+ * VRANGE_FULL_MODE - Once VM start to discard pages, it discards all pages
+ * 		in a vrange.
+ * VRANGE_PARTIAL_MODE - VM discards some pages of all vranges by round-robin
+ *
+ * return values:
+ *  0 - success and NOT purged.
+ *  1 - at least, one of pages [start, start + len) is discarded by VM.
+ *  -EINVAL - start  len < 0, start is not page-aligned, start is greater
+ *		than TASK_SIZE or "mode" is not a valid value.
+ *  -ENOMEM -  Short of free memory in system for successful system call.
+ */
+SYSCALL_DEFINE4(vrange, unsigned long, start,
+		size_t, len, int, mode, int, behavior)
+{
+	unsigned long end;
+	struct mm_struct *mm = current->mm;
+	int ret = -EINVAL;
+
+	if (start & ~PAGE_MASK)
+		goto out;
+
+	len &= PAGE_MASK;
+	if (!len)
+		goto out;
+
+	end = start  len;
+	if (end < start)
+		goto out;
+
+	if (start >= TASK_SIZE)
+		goto out;
+
+	if (mode == VRANGE_VOLATILE)
+		ret = add_vrange(mm, start, end - 1);
+	else if (mode == VRANGE_NOVOLATILE)
+		ret = remove_vrange(mm, start, end - 1);
+out:
+	return ret;
 }
