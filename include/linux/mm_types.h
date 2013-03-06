@@ -13,6 +13,7 @@
 #include <linux/page-debug-flags.h>
 #include <linux/uprobes.h>
 #include <linux/page-flags-layout.h>
+#include <linux/mutex.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
 
@@ -351,6 +352,10 @@ struct mm_struct {
 						 */
 
 
+#ifdef CONFIG_MMU
+	struct rb_root v_rb;		/* vrange rb tree */
+	struct mutex v_lock;		/* Protect v_rb */
+#endif
 	unsigned long hiwater_rss;	/* High-watermark of RSS usage */
 	unsigned long hiwater_vm;	/* High-water virtual memory usage */
 
