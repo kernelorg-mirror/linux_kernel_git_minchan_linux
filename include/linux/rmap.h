@@ -83,6 +83,8 @@ enum ttu_flags {
 };
 
 #ifdef CONFIG_MMU
+unsigned long vma_address(struct page *page, struct vm_area_struct *vma);
+
 static inline void get_anon_vma(struct anon_vma *anon_vma)
 {
 	atomic_inc(&anon_vma->refcount);
@@ -182,9 +184,11 @@ static inline void page_dup_rmap(struct page *page)
  * Called from mm/vmscan.c to handle paging out
  */
 int page_referenced(struct page *, int is_locked,
-			struct mem_cgroup *memcg, unsigned long *vm_flags);
+			struct mem_cgroup *memcg, unsigned long *vm_flags,
+			int *is_vrange);
 int page_referenced_one(struct page *, struct vm_area_struct *,
-	unsigned long address, unsigned int *mapcount, unsigned long *vm_flags);
+	unsigned long address, unsigned int *mapcount, unsigned long *vm_flags,
+	int *is_vrange);
 
 #define TTU_ACTION(x) ((x) & TTU_ACTION_MASK)
 
@@ -249,9 +253,11 @@ int rmap_walk(struct page *page, int (*rmap_one)(struct page *,
 
 static inline int page_referenced(struct page *page, int is_locked,
 				  struct mem_cgroup *memcg,
-				  unsigned long *vm_flags)
+				  unsigned long *vm_flags,
+				  int *is_vrange)
 {
 	*vm_flags = 0;
+	*is_vrange = 0;
 	return 0;
 }
 

@@ -1932,7 +1932,7 @@ again:
 				continue;
 
 			referenced += page_referenced_one(page, vma,
-				rmap_item->address, &mapcount, vm_flags);
+				rmap_item->address, &mapcount, vm_flags, NULL);
 			if (!search_new_forks || !mapcount)
 				break;
 		}

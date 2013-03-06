@@ -734,6 +734,42 @@ int try_to_free_swap(struct page *page)
 }
 
 /*
+ * It's almost same with free_swap_and_cache except page is already
+ * locked.
+ */
+int __free_swap_and_cache(swp_entry_t entry)
+{
+	struct swap_info_struct *p;
+	struct page *page = NULL;
+
+	if (non_swap_entry(entry))
+		return 1;
+
+	p = swap_info_get(entry);
+	if (p) {
+		if (swap_entry_free(p, entry, 1) == SWAP_HAS_CACHE) {
+			page = find_get_page(swap_address_space(entry),
+						entry.val);
+		}
+		spin_unlock(&swap_lock);
+	}
+
+	if (page) {
+		/*
+		 * Not mapped elsewhere, or swap space full? Free it!
+		 * Also recheck PageSwapCache now page is locked (above).
+		 */
+		if (PageSwapCache(page) && !PageWriteback(page) &&
+				(!page_mapped(page) || vm_swap_full())) {
+			delete_from_swap_cache(page);
+			SetPageDirty(page);
+		}
+		page_cache_release(page);
+	}
+	return p != NULL;
+}
+
+/*
  * Free the swap entry like above, but also try to
  * free the page cache entry if it is the last user.
  */

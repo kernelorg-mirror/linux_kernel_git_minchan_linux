@@ -5,6 +5,9 @@
 #include <linux/interval_tree.h>
 #include <linux/mm.h>
 
+/* To protect race with forker */
+static DECLARE_RWSEM(vrange_fork_lock);
+
 struct vrange {
 	struct interval_tree_node node;
 	bool purged;
@@ -34,6 +37,9 @@ static inline void vrange_unlock(struct mm_struct *mm)
 
 extern void exit_vrange(struct mm_struct *mm);
 void vrange_init(void);
+int discard_vpage(struct page *page);
+bool vrange_address(struct mm_struct *mm, unsigned long start,
+			unsigned long end);
 
 #else
 
@@ -41,5 +47,8 @@ static inline void vrange_init(void) {};
 static inline void mm_init_vrange(struct mm_struct *mm) {};
 static inline void exit_vrange(struct mm_struct *mm);
 
+static inline bool vrange_address(struct mm_struct *mm, unsigned long start,
+		unsigned long end) { return false; };
+static inline int discard_vpage(struct page *page) { return 0 };
 #endif
 #endif /* _LINIUX_VRANGE_H */
