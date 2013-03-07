@@ -83,6 +83,9 @@ enum ttu_flags {
 };
 
 #ifdef CONFIG_MMU
+unsigned long discard_vrange_page_list(struct zone *zone,
+		struct list_head *page_list);
+
 unsigned long vma_address(struct page *page, struct vm_area_struct *vma);
 
 static inline void get_anon_vma(struct anon_vma *anon_vma)

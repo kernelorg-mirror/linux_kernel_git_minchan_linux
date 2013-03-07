@@ -5,14 +5,12 @@
 #include <linux/interval_tree.h>
 #include <linux/mm.h>
 
-/* To protect race with forker */
-static DECLARE_RWSEM(vrange_fork_lock);
-
 struct vrange {
 	struct interval_tree_node node;
 	bool purged;
 	struct mm_struct *mm;
 	struct list_head lru; /* protected by lru_lock */
+	atomic_t refcount;
 };
 
 #define vrange_entry(ptr) \

@@ -683,7 +683,7 @@ static enum page_references page_check_references(struct page *page,
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
-static unsigned long shrink_page_list(struct list_head *page_list,
+unsigned long shrink_page_list(struct list_head *page_list,
 				      struct zone *zone,
 				      struct scan_control *sc,
 				      enum ttu_flags ttu_flags,
@@ -983,6 +983,35 @@ keep:
 	*ret_nr_dirty += nr_dirty;
 	*ret_nr_writeback += nr_writeback;
 	return nr_reclaimed;
+}
+
+
+unsigned long discard_vrange_page_list(struct zone *zone,
+		struct list_head *page_list)
+{
+	unsigned long ret;
+	struct scan_control sc = {
+		.gfp_mask = GFP_KERNEL,
+		.priority = DEF_PRIORITY,
+		.may_unmap = 1,
+		.may_swap = 1,
+		.may_discard = 1
+	};
+
+	unsigned long dummy1, dummy2;
+	struct page *page;
+
+	list_for_each_entry(page, page_list, lru) {
+		VM_BUG_ON(!PageAnon(page));
+		ClearPageActive(page);
+	}
+
+	/* page_list have pages from multiple zones */
+	ret = shrink_page_list(page_list, NULL, &sc,
+			TTU_UNMAP|TTU_IGNORE_ACCESS,
+			&dummy1, &dummy2, false);
+	__mod_zone_page_state(zone, NR_ISOLATED_ANON, -ret);
+	return ret;
 }
 
 unsigned long reclaim_clean_pages_from_list(struct zone *zone,
@@ -2781,6 +2810,16 @@ loop_again:
 			if ((buffer_heads_over_limit && is_highmem_idx(i)) ||
 			    !zone_balanced(zone, testorder,
 					   balance_gap, end_zone)) {
+
+				unsigned int nr_discard;
+				if (testorder == 0) {
+					nr_discard = discard_vrange_pages(zone,
+							SWAP_CLUSTER_MAX);
+					sc.nr_reclaimed += nr_discard;
+					if (zone_balanced(zone, testorder, 0,
+								end_zone))
+						goto zone_balanced;
+				}
 				shrink_zone(zone, &sc);
 
 				reclaim_state->reclaimed_slab = 0;
@@ -2805,7 +2844,8 @@ loop_again:
 				continue;
 			}
 
-			if (zone_balanced(zone, testorder, 0, end_zone))
+			if (zone_balanced(zone, testorder, 0, end_zone)) {
+zone_balanced:
 				/*
 				 * If a zone reaches its high watermark,
 				 * consider it to be no longer congested. It's
@@ -2814,6 +2854,7 @@ loop_again:
 				 * speculatively avoid congestion waits
 				 */
 				zone_clear_flag(zone, ZONE_CONGESTED);
+			}
 		}
 
 		/*
