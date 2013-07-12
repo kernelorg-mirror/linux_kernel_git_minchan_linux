@@ -36,6 +36,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/notifier.h>
 #include <linux/memory.h>
+#include <linux/vrange.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -1500,6 +1501,10 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	/* Clear old maps */
 	error = -ENOMEM;
 munmap_back:
+
+	/* zap any volatile ranges */
+	vrange_clear(&mm->vroot, addr, addr + len);
+
 	if (find_vma_links(mm, addr, addr + len, &prev, &rb_link, &rb_parent)) {
 		if (do_munmap(mm, addr, len))
 			return -ENOMEM;
