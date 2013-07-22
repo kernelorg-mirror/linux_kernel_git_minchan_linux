@@ -10,7 +10,6 @@
 #include <linux/rmap.h>
 #include <linux/hugetlb.h>
 #include "internal.h"
-#include <linux/swap.h>
 #include <linux/mmu_notifier.h>
 
 static struct kmem_cache *vrange_cachep;
@@ -445,6 +444,7 @@ void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	page_remove_rmap(page);
 	page_cache_release(page);
 
+	set_pte_at(mm, addr, pte, swp_entry_to_pte(make_vrange_entry()));
 	pte_unmap_unlock(pte, ptl);
 	mmu_notifier_invalidate_page(mm, addr);
 
@@ -515,4 +515,25 @@ int discard_vpage(struct page *page)
 	}
 
 	return 1;
+}
+
+bool purged_vrange(struct vm_area_struct *vma, unsigned long addr)
+{
+	struct vrange_root *vroot;
+	struct interval_tree_node *node;
+	struct vrange *range;
+	bool ret = false;
+
+	vroot = &vma->vm_mm->vroot;
+
+	vrange_lock(vroot);
+	node = interval_tree_iter_first(&vroot->v_rb, addr,
+						addr + PAGE_SIZE - 1);
+	if (node) {
+		range = vrange_from_node(node);
+		if (range->purged)
+			ret = true;
+	}
+	vrange_unlock(vroot);
+	return ret;
 }
