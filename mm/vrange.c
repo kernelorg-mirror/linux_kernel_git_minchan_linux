@@ -13,6 +13,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/mm_inline.h>
 #include <linux/migrate.h>
+#include <linux/shmem_fs.h>
 
 static struct kmem_cache *vrange_cachep;
 static struct kmem_cache *vroot_cachep;
@@ -610,9 +611,18 @@ bool within_vrange(struct vm_area_struct *vma,
 
 	rcu_read_lock();
 	/* vroot couldn't be destroyed */
-	vroot = vma->vm_mm->vroot;
-	vstart_idx = start;
-	vend_idx = end - 1;
+	if (vma->vm_file && (vma->vm_flags & VM_SHARED)) {
+		vroot = vma->vm_file->f_mapping->vroot;
+		vstart_idx = (vma->vm_pgoff << PAGE_SHIFT) +
+				start - vma->vm_start;
+		vend_idx = (vma->vm_pgoff << PAGE_SHIFT) +
+				end - vma->vm_start - 1;
+	} else {
+		vroot = vma->vm_mm->vroot;
+		vstart_idx = start;
+		vend_idx = end - 1;
+	}
+
 	if (!vroot) {
 		rcu_read_unlock();
 		return ret;
@@ -663,6 +673,7 @@ void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	pte_t *pte;
 	pte_t pteval;
 	spinlock_t *ptl;
+	unsigned long vstart_idx;
 
 	VM_BUG_ON(!vroot);
 	VM_BUG_ON(!PageLocked(page));
@@ -673,11 +684,22 @@ void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 
 	BUG_ON(vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|VM_HUGETLB));
 
+	if (vroot->type == VRANGE_FILE)
+		vstart_idx = (vma->vm_pgoff << PAGE_SHIFT) +
+				addr - vma->vm_start;
+	else if (vroot->type == VRANGE_MM)
+		vstart_idx = addr;
+	else
+		BUG();
+
 	flush_cache_page(vma, address, page_to_pfn(page));
 	pteval = ptep_clear_flush(vma, addr, pte);
 
 	update_hiwater_rss(mm);
-	dec_mm_counter(mm, MM_ANONPAGES);
+	if (PageAnon(page))
+		dec_mm_counter(mm, MM_ANONPAGES);
+	else
+		dec_mm_counter(mm, MM_FILEPAGES);
 
 	page_remove_rmap(page);
 	page_cache_release(page);
@@ -686,7 +708,7 @@ void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	pte_unmap_unlock(pte, ptl);
 	mmu_notifier_invalidate_page(mm, addr);
 
-	do_purge(vroot, addr, addr + PAGE_SIZE - 1);
+	do_purge(vroot, vstart_idx, vstart_idx + PAGE_SIZE - 1);
 }
 
 static int try_to_discard_anon_vpage(struct page *page)
@@ -729,14 +751,55 @@ static int try_to_discard_anon_vpage(struct page *page)
 	return ret;
 }
 
+static int try_to_discard_file_vpage(struct page *page)
+{
+	struct address_space *mapping = page->mapping;
+	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	struct vm_area_struct *vma;
+	struct vrange_root *vroot;
+	bool ret = 1;
+	unsigned long vstart_idx = pgoff;
+
+	if (!page->mapping)
+		return ret;
+
+	vroot = mapping->vroot;
+	if (!vroot)
+		return ret;
+
+	mutex_lock(&mapping->i_mmap_mutex);
+	vrange_lock(vroot);
+
+	if (!__within_vrange(vroot, vstart_idx, vstart_idx + PAGE_SIZE - 1))
+		goto out;
+
+	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff, pgoff) {
+		unsigned long address = vma_address(page, vma);
+		try_to_discard_one(vroot, page, vma, address);
+	}
+
+	BUG_ON(page_mapped(page));
+	/*
+	 * Argh: We have to add new inode->operataion like
+	 * inode->purge instead?
+	 */
+	shmem_purge_page(page->mapping->host, page);
+	ret = 0;
+out:
+	vrange_unlock(vroot);
+	mutex_unlock(&mapping->i_mmap_mutex);
+	return ret;
+}
+
 static int try_to_discard_vpage(struct page *page)
 {
-	return try_to_discard_anon_vpage(page);
+	if (PageAnon(page))
+		return try_to_discard_anon_vpage(page);
+	return try_to_discard_file_vpage(page);
 }
 
 int discard_vpage(struct page *page)
 {
-	VM_BUG_ON(!PageAnon(page));
 	VM_BUG_ON(!PageLocked(page));
 	VM_BUG_ON(PageLRU(page));
 
@@ -762,9 +825,17 @@ bool purged_vrange(struct vm_area_struct *vma, unsigned long addr)
 	struct vrange_root *vroot;
 	struct interval_tree_node *node;
 	struct vrange *range;
+	unsigned long vstart_idx;
 	bool ret = false;
 
-	vroot = vma->vm_mm->vroot;
+	if (vma->vm_file && (vma->vm_flags && VM_SHARED)) {
+		vroot = vma->vm_file->f_mapping->vroot;
+		vstart_idx = (vma->vm_pgoff << PAGE_SHIFT) +
+				addr - vma->vm_start;
+	} else {
+		vroot = vma->vm_mm->vroot;
+		vstart_idx = addr;
+	}
 
 	vrange_lock(vroot);
 	node = interval_tree_iter_first(&vroot->v_rb, addr,
@@ -988,7 +1059,8 @@ static int discard_vrange(struct vrange *vrange)
 		return 0;
 
 	/* TODO : handle VRANGE_FILE */
-	VM_BUG_ON(vroot->type != VRANGE_MM);
+	if (vroot->type != VRANGE_MM)
+		return 0;
 	/*
 	 * Race of vrange->owner could happens with __vrange_remove
 	 * but it's okay because subfunctions will check it again

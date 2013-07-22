@@ -782,6 +782,7 @@ static int page_referenced_anon(struct page *page,
  * @page: the page we're checking references on.
  * @memcg: target memory control group
  * @vm_flags: collect encountered vma->vm_flags who actually referenced the page
+ * @is_vrange: @page is volatile ranges?
  *
  * For an object-based mapped page, find all the places it is mapped and
  * check/clear the referenced flag.  This is done by following the page->mapping
@@ -792,7 +793,7 @@ static int page_referenced_anon(struct page *page,
  */
 static int page_referenced_file(struct page *page,
 				struct mem_cgroup *memcg,
-				unsigned long *vm_flags)
+				unsigned long *vm_flags, int *is_vrange)
 {
 	unsigned int mapcount;
 	struct address_space *mapping = page->mapping;
@@ -833,7 +834,7 @@ static int page_referenced_file(struct page *page,
 		if (memcg && !mm_match_cgroup(vma->vm_mm, memcg))
 			continue;
 		referenced += page_referenced_one(page, vma, address,
-						  &mapcount, vm_flags, NULL);
+						  &mapcount, vm_flags, is_vrange);
 		if (!mapcount)
 			break;
 	}
@@ -879,7 +880,7 @@ int page_referenced(struct page *page,
 								vm_flags, is_vrange);
 		else if (page->mapping)
 			referenced += page_referenced_file(page, memcg,
-								vm_flags);
+								vm_flags, is_vrange);
 		if (we_locked)
 			unlock_page(page);
 
