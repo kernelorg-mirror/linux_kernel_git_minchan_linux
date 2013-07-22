@@ -506,6 +506,10 @@ int discard_vpage(struct page *page)
 
 		if (page_freeze_refs(page, 1)) {
 			unlock_page(page);
+			if (current_is_kswapd())
+				count_vm_event(PGDISCARD_KSWAPD);
+			else
+				count_vm_event(PGDISCARD_DIRECT);
 			return 0;
 		}
 	}
