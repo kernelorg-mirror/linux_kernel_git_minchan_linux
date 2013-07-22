@@ -17,6 +17,7 @@
 #include <linux/prefetch.h>
 #include <linux/buffer_head.h> /* for inode_has_buffers */
 #include <linux/ratelimit.h>
+#include <linux/vrange.h>
 #include "internal.h"
 
 /*
@@ -1416,6 +1417,9 @@ static void iput_final(struct inode *inode)
 	if (!list_empty(&inode->i_lru))
 		inode_lru_list_del(inode);
 	spin_unlock(&inode->i_lock);
+
+	/* drop all vranges on last close */
+	vrange_root_cleanup(inode->i_mapping->vroot);
 
 	evict(inode);
 }

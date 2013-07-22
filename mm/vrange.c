@@ -334,6 +334,34 @@ out:
 	return ret;
 }
 
+static int vroot_prepare_mapping(struct address_space *mapping)
+{
+	int ret = 0;
+	struct vrange_root *vroot;
+
+	mutex_lock(&mapping->i_mmap_mutex);
+	vroot = mapping->vroot;
+	if (!vroot) {
+		/*
+		 * We held i_mmap_mutex so we should use GFP_ATOMIC
+		 * to prevent deadlock with reclaim. Failing to allocate
+		 * with GFP_ATOMIC is good chance to noitfy to caller that
+		 * current memory is tough so caller would be better to
+		 * free memory rather than giving the hint to kernel.
+		 */
+		struct vrange_root *allocated = __vroot_alloc(GFP_ATOMIC);
+		if (!allocated) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		mapping->vroot = allocated;
+		vrange_root_init(mapping->vroot, VRANGE_FILE, mapping);
+	}
+out:
+	mutex_unlock(&mapping->i_mmap_mutex);
+	return ret;
+}
+
 void vrange_root_cleanup(struct vrange_root *vroot)
 {
 	struct vrange *range;
@@ -415,8 +443,7 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 		struct vrange_root *vroot;
 		unsigned long tmp, vstart_idx, vend_idx;
 
-		/* Not support vrange-file yet */
-		if (!vma || vma->vm_file)
+		if (!vma)
 			goto out;
 
 		if (vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|
@@ -435,12 +462,23 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 		if (end_idx < tmp)
 			tmp = end_idx;
 
-		if (vroot_prepare_mm(mm))
-			goto out;
+		if (vma->vm_file && (vma->vm_flags & VM_SHARED)) {
+			struct address_space *mapping;
 
-		vroot = mm->vroot;
-		vstart_idx = start_idx;
-		vend_idx = tmp;
+			mapping = vma->vm_file->f_mapping;
+			if (vroot_prepare_mapping(mapping))
+				goto out;
+			vroot = mapping->vroot;
+			vstart_idx = (vma->vm_pgoff << PAGE_SHIFT) +
+					start_idx - vma->vm_start;
+			vend_idx = vstart_idx + tmp - vstart_idx;
+		} else {
+			if (vroot_prepare_mm(mm))
+				goto out;
+			vroot = mm->vroot;
+			vstart_idx = start_idx;
+			vend_idx = tmp;
+		}
 
 		/* mark or unmark */
 		if (mode == VRANGE_VOLATILE)
