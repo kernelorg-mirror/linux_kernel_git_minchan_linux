@@ -351,6 +351,7 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	struct vm_area_struct *mpnt, *tmp, *prev, **pprev;
 	struct rb_node **rb_link, *rb_parent;
 	int retval;
+	int err_vrange;
 	unsigned long charge;
 	struct mempolicy *pol;
 
@@ -380,10 +381,8 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	retval = khugepaged_fork(mm, oldmm);
 	if (retval)
 		goto out;
-	retval = vrange_fork(mm, oldmm);
-	if (retval)
-		goto out;
 
+	err_vrange = vrange_fork(mm, oldmm);
 	prev = NULL;
 	for (mpnt = oldmm->mmap; mpnt; mpnt = mpnt->vm_next) {
 		struct file *file;
@@ -405,6 +404,9 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (!tmp)
 			goto fail_nomem;
 		*tmp = *mpnt;
+		/* Fix up is_vrange if vrange_fork is failed */
+		if (err_vrange)
+			tmp->is_vrange = 0;
 		INIT_LIST_HEAD(&tmp->anon_vma_chain);
 		pol = mpol_dup(vma_policy(mpnt));
 		retval = PTR_ERR(pol);

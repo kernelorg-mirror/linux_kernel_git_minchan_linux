@@ -290,6 +290,7 @@ struct vm_area_struct {
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
+	int is_vrange;
 };
 
 struct core_thread {

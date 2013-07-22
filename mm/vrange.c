@@ -67,7 +67,8 @@ static inline void __vrange_resize(struct vrange *range,
 }
 
 static int vrange_add(struct vrange_root *vroot,
-			unsigned long start_idx, unsigned long end_idx)
+			unsigned long start_idx, unsigned long end_idx,
+			struct vm_area_struct *vma)
 {
 	struct vrange *new_range, *range;
 	struct interval_tree_node *node, *next;
@@ -101,6 +102,7 @@ static int vrange_add(struct vrange_root *vroot,
 
 	__vrange_set(new_range, start_idx, end_idx, purged);
 	__vrange_add(new_range, vroot);
+	vma->is_vrange = 1;
 out:
 	vrange_unlock(vroot);
 	return 0;
@@ -108,6 +110,7 @@ out:
 
 static int vrange_remove(struct vrange_root *vroot,
 				unsigned long start_idx, unsigned long end_idx,
+				struct vm_area_struct *vma,
 				int *purged)
 {
 	struct vrange *new_range, *range;
@@ -162,6 +165,11 @@ static int vrange_remove(struct vrange_root *vroot,
 
 		node = next;
 	}
+	if (vma) {
+		if ((vma->vm_start <= start_idx) &&
+			((vma->vm_end - 1) <= end_idx))
+			vma->is_vrange = 0;
+	}
 	vrange_unlock(vroot);
 
 	if (!used_new)
@@ -175,7 +183,7 @@ int vrange_clear(struct vrange_root *vroot,
 {
 	int purged;
 
-	return vrange_remove(vroot, start, end - 1, &purged);
+	return vrange_remove(vroot, start, end - 1, NULL, &purged);
 }
 
 void vrange_root_cleanup(struct vrange_root *vroot)
@@ -231,7 +239,23 @@ int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 	return 0;
 fail:
 	vrange_root_cleanup(new);
-	return 0;
+	return -ENOMEM;
+}
+
+bool is_vrange(struct mm_struct *mm,
+				unsigned long start, unsigned long end)
+{
+	bool ret;
+	struct vrange_root *vroot;
+	struct interval_tree_node *node;
+
+	vroot = &mm->vroot;
+
+	vrange_lock(vroot);
+	node = interval_tree_iter_first(&vroot->v_rb, start, end - 1);
+	vrange_unlock(vroot);
+	ret = node ? true : false;
+	return ret;
 }
 
 static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
@@ -274,11 +298,10 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 
 		/* mark or unmark */
 		if (mode == VRANGE_VOLATILE)
-			ret = vrange_add(vroot, vstart_idx, vend_idx);
+			ret = vrange_add(vroot, vstart_idx, vend_idx, vma);
 		else if (mode == VRANGE_NONVOLATILE)
 			ret = vrange_remove(vroot, vstart_idx, vend_idx,
-						purged);
-
+						vma, purged);
 		if (ret)
 			goto out;
 

@@ -1501,10 +1501,6 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	/* Clear old maps */
 	error = -ENOMEM;
 munmap_back:
-
-	/* zap any volatile ranges */
-	vrange_clear(&mm->vroot, addr, addr + len);
-
 	if (find_vma_links(mm, addr, addr + len, &prev, &rb_link, &rb_parent)) {
 		if (do_munmap(mm, addr, len))
 			return -ENOMEM;
@@ -1521,6 +1517,10 @@ munmap_back:
 		vm_flags |= VM_ACCOUNT;
 	}
 
+	/*
+	 * vroot shouldn't include new mmaped region
+	 */
+	WARN_ON(is_vrange(mm, addr, addr + len));
 	/*
 	 * Can we just expand an old mapping?
 	 */
