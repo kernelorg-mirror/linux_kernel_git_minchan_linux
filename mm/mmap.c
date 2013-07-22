@@ -1518,10 +1518,6 @@ munmap_back:
 	}
 
 	/*
-	 * vroot shouldn't include new mmaped region
-	 */
-	WARN_ON(is_vrange(mm, addr, addr + len));
-	/*
 	 * Can we just expand an old mapping?
 	 */
 	vma = vma_merge(mm, prev, addr, addr + len, vm_flags, NULL, file, pgoff, NULL);

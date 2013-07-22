@@ -13,6 +13,7 @@
 #include <linux/mmu_notifier.h>
 
 static struct kmem_cache *vrange_cachep;
+static struct kmem_cache *vroot_cachep;
 
 static struct vrange_list {
 	struct list_head list;
@@ -30,7 +31,36 @@ void __init vrange_init(void)
 	INIT_LIST_HEAD(&vrange_list.list);
 	mutex_init(&vrange_list.lock);
 
+	vroot_cachep = kmem_cache_create("vrange_root",
+				sizeof(struct vrange_root), 0,
+				SLAB_DESTROY_BY_RCU|SLAB_PANIC, NULL);
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
+}
+
+static struct vrange_root *__vroot_alloc(gfp_t flags)
+{
+	struct vrange_root *vroot = kmem_cache_alloc(vroot_cachep, flags);
+	if (!vroot)
+		return vroot;
+
+	atomic_set(&vroot->refcount, 1);
+	return vroot;
+}
+
+static inline int __vroot_get(struct vrange_root *vroot)
+{
+	if (!atomic_inc_not_zero(&vroot->refcount))
+		return 0;
+
+	return 1;
+}
+
+static inline void __vroot_put(struct vrange_root *vroot)
+{
+	if (atomic_dec_and_test(&vroot->refcount)) {
+		WARN_ON(!RB_EMPTY_ROOT(&vroot->v_rb));
+		kmem_cache_free(vroot_cachep, vroot);
+	}
 }
 
 static struct vrange *__vrange_alloc(gfp_t flags)
@@ -238,10 +268,37 @@ int vrange_clear(struct vrange_root *vroot,
 	return vrange_remove(vroot, start, end - 1, NULL, &purged);
 }
 
+static int vroot_prepare_mm(struct mm_struct *mm)
+{
+	int ret = 0;
+	struct vrange_root *vroot = mm->vroot;
+	if (!vroot) {
+		struct vrange_root *allocated = __vroot_alloc(GFP_NOFS);
+		if (!allocated) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		spin_lock(&mm->page_table_lock);
+		if (!mm->vroot) {
+			mm->vroot = allocated;
+			allocated = NULL;
+			vrange_root_init(mm->vroot, VRANGE_MM);
+		}
+		spin_unlock(&mm->page_table_lock);
+		if (allocated)
+			__vroot_put(allocated);
+	}
+out:
+	return ret;
+}
+
 void vrange_root_cleanup(struct vrange_root *vroot)
 {
 	struct vrange *range;
 	struct rb_node *next;
+
+	if (vroot == NULL)
+		return;
 
 	vrange_lock(vroot);
 	next = rb_first(&vroot->v_rb);
@@ -252,6 +309,7 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 		__vrange_put(range);
 	}
 	vrange_unlock(vroot);
+	__vroot_put(vroot);
 }
 
 /*
@@ -259,6 +317,7 @@ void vrange_root_cleanup(struct vrange_root *vroot)
  * can't have copied own vrange data structure so that pages in the
  * vrange couldn't be purged. It would be better rather than failing
  * fork.
+ * The down_write of both mm->mmap_sem protects mm->vroot race.
  */
 int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 {
@@ -266,8 +325,14 @@ int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 	struct vrange *range, *new_range;
 	struct rb_node *next;
 
-	new = &new_mm->vroot;
-	old = &old_mm->vroot;
+	if (!old_mm->vroot)
+		return 0;
+
+	if (vroot_prepare_mm(new_mm))
+		return -ENOMEM;
+
+	new = new_mm->vroot;
+	old = old_mm->vroot;
 
 	vrange_lock(old);
 	next = rb_first(&old->v_rb);
@@ -292,22 +357,6 @@ int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 fail:
 	vrange_root_cleanup(new);
 	return -ENOMEM;
-}
-
-bool is_vrange(struct mm_struct *mm,
-				unsigned long start, unsigned long end)
-{
-	bool ret;
-	struct vrange_root *vroot;
-	struct interval_tree_node *node;
-
-	vroot = &mm->vroot;
-
-	vrange_lock(vroot);
-	node = interval_tree_iter_first(&vroot->v_rb, start, end - 1);
-	vrange_unlock(vroot);
-	ret = node ? true : false;
-	return ret;
 }
 
 static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
@@ -344,7 +393,10 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 		if (end_idx < tmp)
 			tmp = end_idx;
 
-		vroot = &mm->vroot;
+		if (vroot_prepare_mm(mm))
+			goto out;
+
+		vroot = mm->vroot;
 		vstart_idx = start_idx;
 		vend_idx = tmp;
 
@@ -453,29 +505,59 @@ out:
 	return ret;
 }
 
-static bool __within_vrange(struct vrange_root *vroot,
+static struct vrange *__within_vrange(struct vrange_root *vroot,
 			unsigned long start_idx, unsigned long end_idx)
 {
+	struct vrange *range = NULL;
 	struct interval_tree_node *node;
 
 	node = interval_tree_iter_first(&vroot->v_rb, start_idx, end_idx);
-	return node ? true : false;
+	if (node)
+		range = vrange_from_node(node);
+	return range;
 }
 
 bool within_vrange(struct vm_area_struct *vma,
 			unsigned long start, unsigned long end)
 {
 	struct vrange_root *vroot;
+	struct vrange *vrange;
 	unsigned long vstart_idx, vend_idx;
-	bool ret;
+	bool ret = false;
 
-	vroot = &vma->vm_mm->vroot;
+	if (!vma->is_vrange)
+		return ret;
+
+	rcu_read_lock();
+	/* vroot couldn't be destroyed */
+	vroot = vma->vm_mm->vroot;
 	vstart_idx = start;
 	vend_idx = end - 1;
+	if (!vroot) {
+		rcu_read_unlock();
+		return ret;
+	}
+
+	if (!__vroot_get(vroot)) {
+		rcu_read_unlock();
+		return ret;
+	}
+
+	rcu_read_unlock();
 
 	vrange_lock(vroot);
-	ret = __within_vrange(vroot, vstart_idx, vend_idx);
+	vrange = __within_vrange(vroot, vstart_idx, vend_idx);
+	if (vrange) {
+		/*
+		 * vroot can be allocated for another process in
+		 * same period so let's check vroot's stability
+		 */
+		if (likely(vroot == vrange->owner))
+			ret = true;
+	}
 	vrange_unlock(vroot);
+	__vroot_put(vroot);
+
 	return ret;
 }
 
@@ -502,6 +584,7 @@ void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	pte_t pteval;
 	spinlock_t *ptl;
 
+	VM_BUG_ON(!vroot);
 	VM_BUG_ON(!PageLocked(page));
 
 	pte = page_check_address(page, mm, addr, &ptl, 0);
@@ -546,9 +629,11 @@ static int try_to_discard_anon_vpage(struct page *page)
 	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
 		vma = avc->vma;
 		mm = vma->vm_mm;
-		vroot = &mm->vroot;
-		address = vma_address(page, vma);
+		vroot = mm->vroot;
+		if (!vroot)
+			continue;
 
+		address = vma_address(page, vma);
 		vrange_lock(vroot);
 		if (!__within_vrange(vroot, address, address + PAGE_SIZE - 1)) {
 			vrange_unlock(vroot);
@@ -599,7 +684,7 @@ bool purged_vrange(struct vm_area_struct *vma, unsigned long addr)
 	struct vrange *range;
 	bool ret = false;
 
-	vroot = &vma->vm_mm->vroot;
+	vroot = vma->vm_mm->vroot;
 
 	vrange_lock(vroot);
 	node = interval_tree_iter_first(&vroot->v_rb, addr,

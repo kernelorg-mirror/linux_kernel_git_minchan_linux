@@ -1385,7 +1385,7 @@ void unmap_vmas(struct mmu_gather *tlb,
 	mmu_notifier_invalidate_range_end(mm, start_addr, end_addr);
 
 	if (vma && vma->is_vrange)
-		vrange_clear(&vma->vm_mm->vroot, start_addr, end_addr);
+		vrange_clear(vma->vm_mm->vroot, start_addr, end_addr);
 }
 
 /**

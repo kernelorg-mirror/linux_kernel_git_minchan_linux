@@ -13,6 +13,7 @@ struct vrange_root {
 	struct rb_root v_rb;		/* vrange rb tree */
 	struct mutex v_lock;		/* Protect v_rb */
 	enum vrange_type type;		/* range root type */
+	atomic_t refcount;
 };
 
 struct vrange {
