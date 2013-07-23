@@ -905,16 +905,19 @@ unsigned int discard_vma_pages(struct mm_struct *mm,
  * vrange->owner isn't stable because caller doesn't hold vrange_lock
  * so avoid touching vrange->owner.
  */
-unsigned int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange)
+int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
+				unsigned int *ret_discard)
 {
+	int ret = -EBUSY;
 	struct vm_area_struct *vma;
 	unsigned int nr_discard = 0;
 	unsigned long start = vrange->node.start;
 	unsigned long end = vrange->node.last + 1;
 
 	if (!down_read_trylock(&mm->mmap_sem))
-		goto out;
+		goto out; /* this vrange could be retried */
 
+	ret = 0;
 	vma = find_vma(mm, start);
 	if (!vma || (vma->vm_start >= end))
 		goto out_unlock;
@@ -931,12 +934,14 @@ unsigned int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange)
 	}
 out_unlock:
 	up_read(&mm->mmap_sem);
+	*ret_discard = nr_discard;
 out:
-	return nr_discard;
+	return ret;
 }
 
-static unsigned int discard_vrange(struct vrange *vrange)
+static int discard_vrange(struct vrange *vrange)
 {
+	int ret = 0;
 	struct mm_struct *mm;
 	struct vrange_root *vroot;
 	unsigned int nr_discard = 0;
@@ -954,8 +959,8 @@ static unsigned int discard_vrange(struct vrange *vrange)
 		goto out;
 
 	mm = vroot->object;
-	nr_discard = __discard_vrange_anon(mm, vrange);
-	if (nr_discard) {
+	ret = __discard_vrange_anon(mm, vrange, &nr_discard);
+	if (!ret) {
 		if (current_is_kswapd())
 			count_vm_events(PGDISCARD_KSWAPD, nr_discard);
 		else
@@ -963,7 +968,7 @@ static unsigned int discard_vrange(struct vrange *vrange)
 	}
 out:
 	__vroot_put(vroot);
-	return nr_discard;
+	return ret;
 }
 
 static int shrink_vrange(struct shrinker *s, struct shrink_control *sc)
@@ -991,8 +996,9 @@ static int shrink_vrange(struct shrinker *s, struct shrink_control *sc)
 			continue;
 		}
 
-		discard_vrange(range);
-		__vrange_lru_add(range);
+		if (discard_vrange(range) < 0)
+			__vrange_lru_add(range);
+
 		__vrange_put(range);
 
 		size -= vrange_size(range);
