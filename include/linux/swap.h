@@ -387,7 +387,7 @@ extern int swap_duplicate(swp_entry_t);
 extern int swapcache_prepare(swp_entry_t);
 extern void swap_free(swp_entry_t);
 extern void swapcache_free(swp_entry_t, struct page *page);
-extern int free_swap_and_cache(swp_entry_t);
+extern int free_swap_and_cache(swp_entry_t, bool);
 extern int swap_type_of(dev_t, sector_t, struct block_device **);
 extern unsigned int count_swap_pages(int, int);
 extern sector_t map_swap_page(struct page *, struct block_device **);
@@ -428,7 +428,7 @@ static inline void show_swap_cache_info(void)
 {
 }
 
-#define free_swap_and_cache(swp)	is_migration_entry(swp)
+#define free_swap_and_cache(swp,lock)	is_migration_entry(swp)
 #define swapcache_prepare(swp)		is_migration_entry(swp)
 
 static inline int add_swap_count_continuation(swp_entry_t swp, gfp_t gfp_mask)

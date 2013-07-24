@@ -1192,7 +1192,7 @@ again:
 				else
 					rss[MM_FILEPAGES]--;
 			}
-			if (unlikely(!free_swap_and_cache(entry)))
+			if (unlikely(!free_swap_and_cache(entry, false)))
 				print_bad_pte(vma, addr, ptent, NULL);
 		}
 out:

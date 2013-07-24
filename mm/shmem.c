@@ -384,7 +384,7 @@ export:
  * Remove swap entry from radix tree, free the swap and its page cache.
  */
 static int shmem_free_swap(struct address_space *mapping,
-			   pgoff_t index, void *radswap)
+			   pgoff_t index, void *radswap, bool page_lock)
 {
 	int error;
 
@@ -392,7 +392,7 @@ static int shmem_free_swap(struct address_space *mapping,
 	error = shmem_radix_tree_replace(mapping, index, radswap, NULL);
 	spin_unlock_irq(&mapping->tree_lock);
 	if (!error)
-		free_swap_and_cache(radix_to_swp_entry(radswap));
+		free_swap_and_cache(radix_to_swp_entry(radswap), page_lock);
 	return error;
 }
 
@@ -483,7 +483,7 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 				if (unfalloc)
 					continue;
 				nr_swaps_freed += !shmem_free_swap(mapping,
-								index, page);
+								index, page, false);
 				continue;
 			}
 
@@ -561,7 +561,7 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 				if (unfalloc)
 					continue;
 				nr_swaps_freed += !shmem_free_swap(mapping,
-								index, page);
+								index, page, false);
 				continue;
 			}
 

@@ -737,7 +737,7 @@ int try_to_free_swap(struct page *page)
  * Free the swap entry like above, but also try to
  * free the page cache entry if it is the last user.
  */
-int free_swap_and_cache(swp_entry_t entry)
+int free_swap_and_cache(swp_entry_t entry, bool page_lock)
 {
 	struct swap_info_struct *p;
 	struct page *page = NULL;
@@ -750,7 +750,7 @@ int free_swap_and_cache(swp_entry_t entry)
 		if (swap_entry_free(p, entry, 1) == SWAP_HAS_CACHE) {
 			page = find_get_page(swap_address_space(entry),
 						entry.val);
-			if (page && !trylock_page(page)) {
+			if (page && !page_lock && !trylock_page(page)) {
 				page_cache_release(page);
 				page = NULL;
 			}
@@ -767,7 +767,8 @@ int free_swap_and_cache(swp_entry_t entry)
 			delete_from_swap_cache(page);
 			SetPageDirty(page);
 		}
-		unlock_page(page);
+		if (!page_lock)
+			unlock_page(page);
 		page_cache_release(page);
 	}
 	return p != NULL;
