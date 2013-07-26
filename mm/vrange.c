@@ -78,7 +78,7 @@ static inline void __vroot_put(struct vrange_root *vroot)
 		enum {VRANGE_MM, VRANGE_FILE} type = vroot->type;
 		if (type == VRANGE_MM) {
 			struct mm_struct *mm = vroot->object;
-			mmput(mm);
+			mmdrop(mm);
 		} else if (type == VRANGE_FILE) {
 			/* TODO : */
 		} else
@@ -322,11 +322,7 @@ static int vroot_prepare_mm(struct mm_struct *mm)
 			mm->vroot = allocated;
 			allocated = NULL;
 			vrange_root_init(mm->vroot, VRANGE_MM, mm);
-			/*
-			 * mm_struct and vma shouldn't be destroyed
-			 * until vroot is destroyed.
-			 */
-			atomic_inc(&mm->mm_users);
+			atomic_inc(&mm->mm_count);
 		}
 		spin_unlock(&mm->page_table_lock);
 		if (allocated)
@@ -1024,6 +1020,10 @@ int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
 	unsigned long start = vrange->node.start;
 	unsigned long end = vrange->node.last + 1;
 
+	/* It prevent to destroy vma when the process exist */
+	if (!atomic_inc_not_zero(&mm->mm_users))
+		return 0;
+
 	if (!down_read_trylock(&mm->mmap_sem))
 		goto out; /* this vrange could be retried */
 
@@ -1044,6 +1044,7 @@ int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
 	}
 out_unlock:
 	up_read(&mm->mmap_sem);
+	mmput(mm);
 	*ret_discard = nr_discard;
 out:
 	return ret;
