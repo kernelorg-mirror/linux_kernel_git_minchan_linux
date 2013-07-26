@@ -473,7 +473,7 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 			vroot = mapping->vroot;
 			vstart_idx = (vma->vm_pgoff << PAGE_SHIFT) +
 					start_idx - vma->vm_start;
-			vend_idx = vstart_idx + tmp - vstart_idx;
+			vend_idx = vstart_idx + tmp - start_idx;
 		} else {
 			if (vroot_prepare_mm(mm))
 				goto out;
@@ -759,7 +759,7 @@ static int try_to_discard_file_vpage(struct page *page)
 	struct vm_area_struct *vma;
 	struct vrange_root *vroot;
 	bool ret = 1;
-	unsigned long vstart_idx = pgoff;
+	unsigned long vstart_idx = page->index << PAGE_SHIFT;
 
 	if (!page->mapping)
 		return ret;
