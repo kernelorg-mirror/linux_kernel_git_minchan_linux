@@ -1024,8 +1024,10 @@ int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
 	if (!atomic_inc_not_zero(&mm->mm_users))
 		return 0;
 
-	if (!down_read_trylock(&mm->mmap_sem))
+	if (!down_read_trylock(&mm->mmap_sem)) {
+		mmput(mm);
 		goto out; /* this vrange could be retried */
+	}
 
 	ret = 0;
 	vma = find_vma(mm, start);
