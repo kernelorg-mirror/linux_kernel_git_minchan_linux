@@ -15,6 +15,9 @@ struct vrange_root {
 	enum vrange_type type;		/* range root type */
 	atomic_t refcount;
 	void *object;			/* mm_struct */
+#ifdef CONFIG_SYSFS
+	struct list_head list;		/* for debugging vroot leak */
+#endif
 };
 
 struct vrange {

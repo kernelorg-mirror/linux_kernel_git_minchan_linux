@@ -45,6 +45,9 @@ static struct shrinker vrange_shrinker = {
 
 #ifdef CONFIG_SYSFS
 
+static LIST_HEAD(vroot_list);
+static DEFINE_SPINLOCK(vroot_lock);
+
 static atomic_t vrange_alloc = ATOMIC_INIT(0);
 
 #define VRANGE_ATTR_RO(_name) \
@@ -57,8 +60,32 @@ static ssize_t vrange_alloc_show(struct kobject *kobj,
 }
 VRANGE_ATTR_RO(vrange_alloc);
 
+static ssize_t vroot_alloc_show(struct kobject *kobj,
+				   struct kobj_attribute *attr, char *buf)
+{
+	int ret = 0;
+	struct mm_struct *mm;
+	struct vrange_root *cursor;
+
+	spin_lock(&vroot_lock);
+	list_for_each_entry(cursor, &vroot_list, list) {
+		if (cursor->type == VRANGE_MM) {
+			mm = cursor->object;
+			ret += sprintf(buf, "mm %p mm_count %d mm_users %d"
+					    "  tree empty %d\n",
+			mm, atomic_read(&mm->mm_count),
+			atomic_read(&mm->mm_users),
+			RB_EMPTY_ROOT(&cursor->v_rb));
+		}
+	}
+	spin_unlock(&vroot_lock);
+	return ret;
+}
+VRANGE_ATTR_RO(vroot_alloc);
+
 static struct attribute *vrange_attr[] = {
 	&vrange_alloc_attr.attr,
+	&vroot_alloc_attr.attr,
 	NULL,
 };
 
@@ -150,6 +177,11 @@ static struct vrange_root *__vroot_alloc(gfp_t flags)
 		return vroot;
 
 	atomic_set(&vroot->refcount, 1);
+#ifdef CONFIG_SYSFS
+	spin_lock(&vroot_lock);
+	list_add(&vroot->list, &vroot_list);
+	spin_unlock(&vroot_lock);
+#endif
 	return vroot;
 }
 
@@ -174,6 +206,11 @@ static inline void __vroot_put(struct vrange_root *vroot)
 			BUG();
 
 		WARN_ON(!RB_EMPTY_ROOT(&vroot->v_rb));
+#ifdef CONFIG_SYSFS
+		spin_lock(&vroot_lock);
+		list_del(&vroot->list);
+		spin_unlock(&vroot_lock);
+#endif
 		kmem_cache_free(vroot_cachep, vroot);
 	}
 }
