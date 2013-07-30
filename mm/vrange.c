@@ -42,17 +42,37 @@ static struct shrinker vrange_shrinker = {
 	.seeks = DEFAULT_SEEKS
 };
 
-void __init vrange_init(void)
+static int __init vrange_init(void)
 {
+	int err = 0;
+
 	INIT_LIST_HEAD(&vrange_list.list);
 	mutex_init(&vrange_list.lock);
 
-	register_shrinker(&vrange_shrinker);
 	vroot_cachep = kmem_cache_create("vrange_root",
 				sizeof(struct vrange_root), 0,
 				SLAB_DESTROY_BY_RCU|SLAB_PANIC, NULL);
+	if (!vroot_cachep) {
+		err = -ENOMEM;
+		goto out;
+	}	
+		
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
+	if (!vrange_cachep) {
+		err = -ENOMEM;
+		goto free_vroot_cache;
+	}
+
+	register_shrinker(&vrange_shrinker);
+
+	return err;
+
+free_vroot_cache:
+	kmem_cache_destroy(vroot_cachep);
+out:
+	return err;
 }
+module_init(vrange_init)
 
 static struct vrange_root *__vroot_alloc(gfp_t flags)
 {

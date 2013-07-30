@@ -47,7 +47,6 @@ static inline int vrange_type(struct vrange *vrange)
 	return vrange->owner->type;
 }
 
-void vrange_init(void);
 extern int vrange_clear(struct vrange_root *vroot,
 				unsigned long start, unsigned long end);
 extern void vrange_root_cleanup(struct vrange_root *vroot);
@@ -61,7 +60,6 @@ extern bool purged_vrange(struct vm_area_struct *vma, unsigned long address);
 
 #else
 
-static inline void vrange_init(void) {};
 static inline void vrange_root_init(struct vrange_root *vroot,
 					int type, void *obj) {};
 static inline void vrange_root_cleanup(struct vrange_root *vroot) {};
