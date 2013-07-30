@@ -45,10 +45,20 @@ static struct shrinker vrange_shrinker = {
 
 #ifdef CONFIG_SYSFS
 
+static atomic_t vrange_alloc = ATOMIC_INIT(0);
+
 #define VRANGE_ATTR_RO(_name) \
 	static struct kobj_attribute _name##_attr = __ATTR_RO(_name)
 
+static ssize_t vrange_alloc_show(struct kobject *kobj,
+				   struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", atomic_read(&vrange_alloc));
+}
+VRANGE_ATTR_RO(vrange_alloc);
+
 static struct attribute *vrange_attr[] = {
+	&vrange_alloc_attr.attr,
 	NULL,
 };
 
@@ -177,6 +187,9 @@ static struct vrange *__vrange_alloc(gfp_t flags)
 	INIT_LIST_HEAD(&vrange->lru);
 	atomic_set(&vrange->refcount, 1);
 
+#ifdef CONFIG_SYSFS
+	atomic_inc(&vrange_alloc);
+#endif
 	return vrange;
 }
 
@@ -186,6 +199,9 @@ static void __vrange_free(struct vrange *range)
 	WARN_ON(atomic_read(&range->refcount) != 0);
 	WARN_ON(!list_empty(&range->lru));
 
+#ifdef CONFIG_SYSFS
+	atomic_dec(&vrange_alloc);
+#endif
 	kmem_cache_free(vrange_cachep, range);
 }
 
