@@ -42,12 +42,70 @@ static struct shrinker vrange_shrinker = {
 	.seeks = DEFAULT_SEEKS
 };
 
+
+#ifdef CONFIG_SYSFS
+
+#define VRANGE_ATTR_RO(_name) \
+	static struct kobj_attribute _name##_attr = __ATTR_RO(_name)
+
+static struct attribute *vrange_attr[] = {
+	NULL,
+};
+
+static struct attribute_group vrange_attr_group = {
+	.attrs = vrange_attr,
+};
+
+static int __init vrange_init_sysfs(struct kobject **vrange_kobj)
+{
+	int err;
+
+	*vrange_kobj = kobject_create_and_add("vrange", mm_kobj);
+	if (unlikely(!*vrange_kobj)) {
+		printk(KERN_ERR "vrange: failed to create vrange kobject\n");
+		return -ENOMEM;
+	}
+
+	err = sysfs_create_group(*vrange_kobj, &vrange_attr_group);
+	if (err) {
+		printk(KERN_ERR "vrange: failed to register vrange group\n");
+		goto delete_obj;
+	}
+
+	return 0;
+
+delete_obj:
+	kobject_put(*vrange_kobj);
+	return err;
+}
+
+static void __init vrange_exit_sysfs(struct kobject *vrange_kobj)
+{
+	sysfs_remove_group(vrange_kobj, &vrange_attr_group);
+	kobject_put(vrange_kobj);
+}
+#else
+static inline int vrange_init_sysfs(struct kobject **vrange_kobj)
+{
+	return 0;
+}
+
+static inline void vrange_exit_sysfs(struct kobject *vrange_kobj)
+{
+}
+#endif /* CONFIG_SYSFS */
+
 static int __init vrange_init(void)
 {
 	int err = 0;
 
+	struct kobject *vrange_kobj;
 	INIT_LIST_HEAD(&vrange_list.list);
 	mutex_init(&vrange_list.lock);
+
+	err = vrange_init_sysfs(&vrange_kobj);
+	if (err)
+		return err;
 
 	vroot_cachep = kmem_cache_create("vrange_root",
 				sizeof(struct vrange_root), 0,
@@ -70,6 +128,7 @@ static int __init vrange_init(void)
 free_vroot_cache:
 	kmem_cache_destroy(vroot_cachep);
 out:
+	vrange_exit_sysfs(vrange_kobj);
 	return err;
 }
 module_init(vrange_init)
