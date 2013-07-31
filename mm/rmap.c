@@ -25,15 +25,16 @@
  *     page->flags PG_locked (lock_page)
  *       mapping->i_mmap_mutex
  *         anon_vma->rwsem
- *           mm->page_table_lock or pte_lock
- *             zone->lru_lock (in mark_page_accessed, isolate_lru_page)
- *             swap_lock (in swap_duplicate, swap_info_get)
- *               mmlist_lock (in mmput, drain_mmlist and others)
- *               mapping->private_lock (in __set_page_dirty_buffers)
- *               inode->i_lock (in set_page_dirty's __mark_inode_dirty)
- *               bdi.wb->list_lock (in set_page_dirty's __mark_inode_dirty)
- *                 sb_lock (within inode_lock in fs/fs-writeback.c)
- *                 mapping->tree_lock (widely used, in set_page_dirty,
+ *           vrange_lock
+ *             mm->page_table_lock or pte_lock
+ *               zone->lru_lock (in mark_page_accessed, isolate_lru_page)
+ *               swap_lock (in swap_duplicate, swap_info_get)
+ *                 mmlist_lock (in mmput, drain_mmlist and others)
+ *                 mapping->private_lock (in __set_page_dirty_buffers)
+ *                 inode->i_lock (in set_page_dirty's __mark_inode_dirty)
+ *                 bdi.wb->list_lock (in set_page_dirty's __mark_inode_dirty)
+ *                   sb_lock (within inode_lock in fs/fs-writeback.c)
+ *                   mapping->tree_lock (widely used, in set_page_dirty,
  *                           in arch-dependent flush_dcache_mmap_lock,
  *                           within bdi.wb->list_lock in __sync_single_inode)
  *

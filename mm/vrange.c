@@ -82,6 +82,12 @@ static ssize_t vroot_alloc_show(struct kobject *kobj,
 }
 VRANGE_ATTR_RO(vroot_alloc);
 
+/*
+ * Now sysfs attribute is for debugging purpose so we could remove
+ * them after it's stable but sysfs facility still is needed because
+ * upcoming patches will have new attribute to tune vrange from
+ * administrator.
+ */
 static struct attribute *vrange_attr[] = {
 	&vrange_alloc_attr.attr,
 	&vroot_alloc_attr.attr,
@@ -477,7 +483,7 @@ static int vroot_prepare_mapping(struct address_space *mapping)
 		 * to prevent deadlock with reclaim. Failing to allocate
 		 * with GFP_ATOMIC is good chance to noitfy to caller that
 		 * current memory is tough so caller would be better to
-		 * free memory rather than giving the hint to kernel.
+		 * free memory directly rather than giving the hint to kernel.
 		 */
 		struct vrange_root *allocated = __vroot_alloc(GFP_ATOMIC);
 		if (!allocated) {
@@ -719,6 +725,7 @@ out:
 	return ret;
 }
 
+/* Caller should hold vroot's lock */
 static struct vrange *__within_vrange(struct vrange_root *vroot,
 			unsigned long start_idx, unsigned long end_idx)
 {
@@ -731,6 +738,9 @@ static struct vrange *__within_vrange(struct vrange_root *vroot,
 	return range;
 }
 
+/*
+ * [start, end) in vma fits vrange
+ */
 bool within_vrange(struct vm_area_struct *vma,
 			unsigned long start, unsigned long end)
 {
@@ -741,11 +751,17 @@ bool within_vrange(struct vm_area_struct *vma,
 	struct address_space *mapping;
 	bool ret = false;
 
+	/*
+	 * vma->is_vrange could be raced if it doesn't hold vroot lock.
+	 * but now this function is used for only page_referenced_one
+	 * so worst case is swap out the page instead of purging and
+	 * it would be rare so there isn't a big problem.
+	 */
 	if (!vma->is_vrange)
 		return ret;
 
 	rcu_read_lock();
-	/* vroot couldn't be destroyed */
+	/* vroot couldn't be destroyed by RCU */
 	if (vma->vm_file && (vma->vm_flags & VM_SHARED)) {
 		mapping = vma->vm_file->f_mapping;
 		vroot = mapping->vroot;
@@ -770,13 +786,16 @@ bool within_vrange(struct vm_area_struct *vma,
 		return ret;
 	}
 
+	/*
+	 * From now on, it's okay to unlock rcu because we hold a ref count
+	 * of vroot but vroot could be allocated for another process for
+	 * same RCU period so we need another check.
+	 */
 	rcu_read_unlock();
 
 	vrange_lock(vroot);
-	/*
-	 * vroot can be allocated for another process in
-	 * same period so let's check vroot's stability.
-	 */
+
+	/* Let's check vroot again. */
 	if (vroot->type == VRANGE_MM) {
 		if (mm != vroot->object)
 			goto out;
@@ -794,7 +813,7 @@ out:
 	return ret;
 }
 
-/* Caller should hold vrange_lock */
+/* Caller should hold vroot's lock */
 static void do_purge(struct vrange_root *vroot,
 		unsigned long start, unsigned long end)
 {
@@ -809,6 +828,9 @@ static void do_purge(struct vrange_root *vroot,
 	}
 }
 
+/*
+ * Remove @page from vma->vm_mm->page table and mark pte into purged page
+ */
 void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 			struct vm_area_struct *vma, unsigned long addr)
 {
@@ -854,6 +876,9 @@ void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	do_purge(vroot, vstart_idx, vstart_idx + PAGE_SIZE - 1);
 }
 
+/*
+ * return 0 if page is discarded
+ */
 static int try_to_discard_anon_vpage(struct page *page)
 {
 	struct anon_vma *anon_vma;
@@ -871,10 +896,26 @@ static int try_to_discard_anon_vpage(struct page *page)
 		return ret;
 
 	pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+
+	/*
+	 * During interating the loop, some processes could see a page as
+	 * purged while others could see a page as not-purged because we have
+	 * no global lock between parent and child for protecting vrange system
+	 * call during this loop. But it's not a problem because the page is
+	 * not *SHARED* page but *COW* page so parent and child can see other
+	 * data anytime. The worst case by this race is a page was purged
+	 * but couldn't be discarded so it makes unnecessary page fault but
+	 * it would be rare.
+	 */
 	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
 		vma = avc->vma;
 		mm = vma->vm_mm;
 		vroot = mm->vroot;
+
+		/*
+		 * The process doesn't call vrange syscall doesn't have
+		 * vroot.
+		 */
 		if (!vroot)
 			continue;
 
@@ -911,6 +952,8 @@ static int try_to_discard_file_vpage(struct page *page)
 		return ret;
 
 	mutex_lock(&mapping->i_mmap_mutex);
+	/* TODO : check vroot validity again? */
+
 	vrange_lock(vroot);
 
 	if (!__within_vrange(vroot, vstart_idx, vstart_idx + PAGE_SIZE - 1))
@@ -923,8 +966,9 @@ static int try_to_discard_file_vpage(struct page *page)
 
 	BUG_ON(page_mapped(page));
 	/*
-	 * Argh: We have to add new inode->operataion like
-	 * inode->purge instead?
+	 * XXX: It's almost hack we need more general approach
+	 * Maybe should we add new inode->operataion like inode->purge
+	 * instead?
 	 */
 	shmem_purge_page(page->mapping->host, page);
 	ret = 0;
@@ -1059,7 +1103,7 @@ unsigned int discard_vrange_pagelist(struct list_head *page_list)
 		}
 
 		/*
-		 * discard_vapge returns unlocked page if it
+		 * discard_vpage returns unlocked page if it
 		 * is successful
 		 */
 		err = discard_vpage(page);

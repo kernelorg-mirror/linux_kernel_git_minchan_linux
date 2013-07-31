@@ -290,6 +290,12 @@ struct vm_area_struct {
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
+	/*
+	 * Whether this vma is related to a vrange.
+	 * If we all agree the approach but there is a concern about
+	 * blowing vma size, we can encode this bit into vm_end althoug
+	 * we should change lots of files.
+	 */
 	int is_vrange;
 };
 
