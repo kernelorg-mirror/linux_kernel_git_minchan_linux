@@ -1267,6 +1267,10 @@ static int shrink_vrange(struct shrinker *s, struct shrink_control *sc)
 	long nr_to_scan = sc->nr_to_scan;
 	long size = vrange_list.size;
 
+	/* current is dying so it will release memory soon */
+	if (fatal_signal_pending(current))
+		return -1;
+
 	if (!nr_to_scan)
 		return size;
 
