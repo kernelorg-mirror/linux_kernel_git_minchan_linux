@@ -24,7 +24,8 @@ static inline int is_vrange_entry(swp_entry_t entry)
 	return swp_type(entry) == SWP_VRANGE;
 }
 
-static inline void vrange_root_init(struct vrange_root *vroot, int type, void *object)
+static inline void vrange_root_init(struct vrange_root *vroot,
+					int type, void *object)
 {
 	vroot->type = type;
 	vroot->v_rb = RB_ROOT;
@@ -68,8 +69,9 @@ static inline int vrange_fork(struct mm_struct *new, struct mm_struct *old)
 	return 0;
 }
 
-static inline bool within_vrange(struct vm_area_struct *vma, unsigned long start,
-		unsigned long end) { return false; };
+static inline bool within_vrange(struct vm_area_struct *vma,
+				unsigned long start, unsigned long end)
+{ return false; };
 static inline int discard_vpage(struct page *page) { return 0 };
 #endif
 #endif /* _LINIUX_VRANGE_H */

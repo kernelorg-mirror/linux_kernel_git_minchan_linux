@@ -42,7 +42,6 @@ static struct shrinker vrange_shrinker = {
 	.seeks = DEFAULT_SEEKS
 };
 
-
 #ifdef CONFIG_SYSFS
 
 static LIST_HEAD(vroot_list);
@@ -150,8 +149,8 @@ static int __init vrange_init(void)
 	if (!vroot_cachep) {
 		err = -ENOMEM;
 		goto out;
-	}	
-		
+	}
+
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
 	if (!vrange_cachep) {
 		err = -ENOMEM;
@@ -503,7 +502,7 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 
 	vrange_lock(vroot);
 	/* We should remove node by post-order traversal */
-	while((node = rb_first(&vroot->v_rb))) {
+	while ((node = rb_first(&vroot->v_rb))) {
 		range = vrange_entry(node);
 		__vrange_remove(range);
 		__vrange_put(range);
@@ -579,7 +578,7 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 		if (vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|
 					VM_HUGETLB))
 			goto out;
-			
+
 		/* make sure start is at the front of the current vma*/
 		if (start_idx < vma->vm_start) {
 			start_idx = vma->vm_start;
@@ -1069,7 +1068,7 @@ static void vrange_pte_entry(pte_t pteval, unsigned long address,
 		unsigned ptent_size, struct mm_walk *walk)
 {
 	struct page *page;
-	struct vrange_walker*vw = walk->private;
+	struct vrange_walker *vw = walk->private;
 	struct vm_area_struct *vma = vw->vma;
 	struct list_head *pagelist = vw->pagelist;
 
@@ -1277,7 +1276,7 @@ static int shrink_vrange(struct shrinker *s, struct shrink_control *sc)
 	if (sc->nr_to_scan && !(sc->gfp_mask & __GFP_IO))
 		return -1;
 
-	while(size > 0 && nr_to_scan > 0) {
+	while (size > 0 && nr_to_scan > 0) {
 		range = isolate_vrange();
 		if (!range)
 			break;
