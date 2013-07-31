@@ -408,9 +408,10 @@ static int vrange_remove(struct vrange_root *vroot,
 			/*
 			 * Argumented range is middle of the range
 			 */
+			unsigned long last = node->last;
 			used_new = true;
 			__vrange_resize(range, node->start, start_idx - 1);
-			__vrange_set(new_range, end_idx + 1, node->last,
+			__vrange_set(new_range, end_idx + 1, last,
 					range->purged);
 			__vrange_add(new_range, vroot);
 			break;
