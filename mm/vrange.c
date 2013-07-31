@@ -508,6 +508,11 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 		__vrange_put(range);
 	}
 	vrange_unlock(vroot);
+	/*
+	 * Before removing vroot, we should make sure range-owner
+	 * should be NULL. See the smp_rmb of vrange_get_vroot.
+	 */
+	smp_wmb();
 	__vroot_put(vroot);
 }
 
@@ -1026,6 +1031,7 @@ static struct vrange_root *vrange_get_vroot(struct vrange *vrange)
 	 * we need double check. If vrange->owner still isn't NULL,
 	 * it means vroot wan't destroyed.
 	 */
+	smp_rmb();
 	if (!vrange->owner) {
 		__vroot_put(vroot);
 		goto out;
