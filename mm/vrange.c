@@ -732,6 +732,8 @@ bool within_vrange(struct vm_area_struct *vma,
 	struct vrange_root *vroot;
 	struct vrange *vrange;
 	unsigned long vstart_idx, vend_idx;
+	struct mm_struct *mm;
+	struct address_space *mapping;
 	bool ret = false;
 
 	if (!vma->is_vrange)
@@ -740,13 +742,15 @@ bool within_vrange(struct vm_area_struct *vma,
 	rcu_read_lock();
 	/* vroot couldn't be destroyed */
 	if (vma->vm_file && (vma->vm_flags & VM_SHARED)) {
-		vroot = vma->vm_file->f_mapping->vroot;
+		mapping = vma->vm_file->f_mapping;
+		vroot = mapping->vroot;
 		vstart_idx = (vma->vm_pgoff << PAGE_SHIFT) +
 				start - vma->vm_start;
 		vend_idx = (vma->vm_pgoff << PAGE_SHIFT) +
 				end - vma->vm_start - 1;
 	} else {
-		vroot = vma->vm_mm->vroot;
+		mm = vma->vm_mm;
+		vroot = mm->vroot;
 		vstart_idx = start;
 		vend_idx = end - 1;
 	}
@@ -764,15 +768,21 @@ bool within_vrange(struct vm_area_struct *vma,
 	rcu_read_unlock();
 
 	vrange_lock(vroot);
-	vrange = __within_vrange(vroot, vstart_idx, vend_idx);
-	if (vrange) {
-		/*
-		 * vroot can be allocated for another process in
-		 * same period so let's check vroot's stability
-		 */
-		if (likely(vroot == vrange->owner))
-			ret = true;
+	/*
+	 * vroot can be allocated for another process in
+	 * same period so let's check vroot's stability.
+	 */
+	if (vroot->type == VRANGE_MM) {
+		if (mm != vroot->object)
+			goto out;
+	} else {
+		if (mapping != vroot->object)
+			goto out;
 	}
+	vrange = __within_vrange(vroot, vstart_idx, vend_idx);
+	if (vrange)
+		ret = true;
+out:
 	vrange_unlock(vroot);
 	__vroot_put(vroot);
 
