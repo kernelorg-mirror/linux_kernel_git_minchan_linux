@@ -496,16 +496,15 @@ out:
 void vrange_root_cleanup(struct vrange_root *vroot)
 {
 	struct vrange *range;
-	struct rb_node *next;
+	struct rb_node *node;
 
 	if (vroot == NULL)
 		return;
 
 	vrange_lock(vroot);
-	next = rb_first(&vroot->v_rb);
-	while (next) {
-		range = vrange_entry(next);
-		next = rb_next(next);
+	/* We should remove node by post-order traversal */
+	while((node = rb_first(&vroot->v_rb))) {
+		range = vrange_entry(node);
 		__vrange_remove(range);
 		__vrange_put(range);
 	}
