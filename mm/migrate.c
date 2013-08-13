@@ -36,6 +36,7 @@
 #include <linux/hugetlb_cgroup.h>
 #include <linux/gfp.h>
 #include <linux/balloon_compaction.h>
+#include <linux/pinpage.h>
 
 #include <asm/tlbflush.h>
 
@@ -101,12 +102,17 @@ void putback_movable_pages(struct list_head *l)
 
 	list_for_each_entry_safe(page, page2, l, lru) {
 		list_del(&page->lru);
-		dec_zone_page_state(page, NR_ISOLATED_ANON +
-				page_is_file_cache(page));
-		if (unlikely(balloon_page_movable(page)))
-			balloon_page_putback(page);
-		else
-			putback_lru_page(page);
+		if (!PagePin(page)) {
+			dec_zone_page_state(page, NR_ISOLATED_ANON +
+					page_is_file_cache(page));
+			if (unlikely(balloon_page_movable(page)))
+				balloon_page_putback(page);
+			else
+				putback_lru_page(page);
+		} else {
+			unlock_page(page);
+			put_page(page);
+		}
 	}
 }
 
@@ -855,6 +861,39 @@ out:
 	return rc;
 }
 
+static int unmap_and_move_pinpage(new_page_t get_new_page,
+			unsigned long private, struct page *page, int force,
+			enum migrate_mode mode)
+{
+	int *result = NULL;
+	int rc = 0;
+	struct page *newpage = get_new_page(page, private, &result);
+	if (!newpage)
+		return -ENOMEM;
+
+	VM_BUG_ON(!PageLocked(page));
+	if (page_count(page) == 1) {
+		/* page was freed from under us. So we are done. */
+		goto out;
+	}
+
+	rc = migrate_pinpage(page, newpage);
+out:
+	if (rc != -EAGAIN) {
+		list_del(&page->lru);
+		unlock_page(page);
+		put_page(page);
+	}
+
+	if (result) {
+		if (rc)
+			*result = rc;
+		else
+			*result = page_to_nid(newpage);
+	}
+	return rc;
+
+}
 /*
  * Obtain the lock on page, remove all ptes and migrate the page
  * to the newly allocated page in newpage.
@@ -1025,8 +1064,13 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 		list_for_each_entry_safe(page, page2, from, lru) {
 			cond_resched();
 
-			rc = unmap_and_move(get_new_page, private,
+			if (PagePin(page)) {
+				rc = unmap_and_move_pinpage(get_new_page, private,
 						page, pass > 2, mode);
+			} else {
+				rc = unmap_and_move(get_new_page, private,
+					page, pass > 2, mode);
+			}
 
 			switch(rc) {
 			case -ENOMEM:

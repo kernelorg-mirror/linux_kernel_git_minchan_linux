@@ -396,8 +396,10 @@ static void acct_isolated(struct zone *zone, bool locked, struct compact_control
 	struct page *page;
 	unsigned int count[2] = { 0, };
 
-	list_for_each_entry(page, &cc->migratepages, lru)
-		count[!!page_is_file_cache(page)]++;
+	list_for_each_entry(page, &cc->migratepages, lru) {
+		if (!PagePin(page))
+			count[!!page_is_file_cache(page)]++;
+	}
 
 	/* If locked we can use the interrupt unsafe versions */
 	if (locked) {
@@ -535,6 +537,25 @@ isolate_migratepages_range(struct zone *zone, struct compact_control *cc,
 		}
 
 		/*
+		 * Pinned kernel page(ex, zswap) could be isolated.
+		 */
+		if (PagePin(page)) {
+			if (!get_page_unless_zero(page))
+				continue;
+			/*
+			 * Subsystem want to use pinpage should not
+			 * use page->lru feild.
+			 */
+			VM_BUG_ON(!list_empty(&page->lru));
+			if (!trylock_page(page)) {
+				put_page(page);
+				continue;
+			}
+
+			goto isolated;
+		}
+
+		/*
 		 * Check may be lockless but that's ok as we recheck later.
 		 * It's possible to migrate LRU pages and balloon pages
 		 * Skip any other type of page
@@ -601,6 +622,7 @@ isolate_migratepages_range(struct zone *zone, struct compact_control *cc,
 		/* Successfully isolated */
 		cc->finished_update_migrate = true;
 		del_page_from_lru_list(page, lruvec, page_lru(page));
+isolated:
 		list_add(&page->lru, migratelist);
 		cc->nr_migratepages++;
 		nr_isolated++;
