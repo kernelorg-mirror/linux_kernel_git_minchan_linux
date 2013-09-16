@@ -77,99 +77,25 @@ static struct buffer_head *get_block_length(struct super_block *sb,
 }
 
 
-/*
- * Read and decompress a metadata block or datablock.  Length is non-zero
- * if a datablock is being read (the size is stored elsewhere in the
- * filesystem), otherwise the length is obtained from the first two bytes of
- * the metadata block.  A bit in the length field indicates if the block
- * is stored uncompressed in the filesystem (usually because compression
- * generated a larger block - this does occasionally happen with compression
- * algorithms).
- */
-int squashfs_read_data(struct super_block *sb, void **buffer, u64 index,
-			int length, u64 *next_index, int srclength, int pages)
+
+int squashfs_decompress_block(struct squashfs_sb_info *msblk, int compressed,
+		void **buffer, struct buffer_head **bh, int nr_bh,
+		int offset, int length, int srclength, int pages)
 {
-	struct squashfs_sb_info *msblk = sb->s_fs_info;
-	struct buffer_head **bh;
-	int offset = index & ((1 << msblk->devblksize_log2) - 1);
-	u64 cur_index = index >> msblk->devblksize_log2;
-	int bytes, compressed, b = 0, k = 0, page = 0, avail;
-
-	bh = kcalloc(((srclength + msblk->devblksize - 1)
-		>> msblk->devblksize_log2) + 1, sizeof(*bh), GFP_KERNEL);
-	if (bh == NULL)
-		return -ENOMEM;
-
-	if (length) {
-		/*
-		 * Datablock.
-		 */
-		bytes = -offset;
-		compressed = SQUASHFS_COMPRESSED_BLOCK(length);
-		length = SQUASHFS_COMPRESSED_SIZE_BLOCK(length);
-		if (next_index)
-			*next_index = index + length;
-
-		TRACE("Block @ 0x%llx, %scompressed size %d, src size %d\n",
-			index, compressed ? "" : "un", length, srclength);
-
-		if (length < 0 || length > srclength ||
-				(index + length) > msblk->bytes_used)
-			goto read_failure;
-
-		for (b = 0; bytes < length; b++, cur_index++) {
-			bh[b] = sb_getblk(sb, cur_index);
-			if (bh[b] == NULL)
-				goto block_release;
-			bytes += msblk->devblksize;
-		}
-		ll_rw_block(READ, b, bh);
-	} else {
-		/*
-		 * Metadata block.
-		 */
-		if ((index + 2) > msblk->bytes_used)
-			goto read_failure;
-
-		bh[0] = get_block_length(sb, &cur_index, &offset, &length);
-		if (bh[0] == NULL)
-			goto read_failure;
-		b = 1;
-
-		bytes = msblk->devblksize - offset;
-		compressed = SQUASHFS_COMPRESSED(length);
-		length = SQUASHFS_COMPRESSED_SIZE(length);
-		if (next_index)
-			*next_index = index + length + 2;
-
-		TRACE("Block @ 0x%llx, %scompressed size %d\n", index,
-				compressed ? "" : "un", length);
-
-		if (length < 0 || length > srclength ||
-					(index + length) > msblk->bytes_used)
-			goto block_release;
-
-		for (; bytes < length; b++) {
-			bh[b] = sb_getblk(sb, ++cur_index);
-			if (bh[b] == NULL)
-				goto block_release;
-			bytes += msblk->devblksize;
-		}
-		ll_rw_block(READ, b - 1, bh + 1);
-	}
+	int k = 0;
 
 	if (compressed) {
-		length = squashfs_decompress(msblk, buffer, bh, b, offset,
-			 length, srclength, pages);
+		length = squashfs_decompress(msblk, buffer, bh, nr_bh,
+				offset, length, srclength, pages);
 		if (length < 0)
-			goto read_failure;
+			goto out;
 	} else {
 		/*
 		 * Block is uncompressed.
 		 */
-		int in, pg_offset = 0;
+		int bytes, in, avail, pg_offset = 0, page = 0;
 
-		for (bytes = length; k < b; k++) {
+		for (bytes = length; k < nr_bh; k++) {
 			in = min(bytes, msblk->devblksize - offset);
 			bytes -= in;
 			wait_on_buffer(bh[k]);
@@ -193,6 +119,154 @@ int squashfs_read_data(struct super_block *sb, void **buffer, u64 index,
 		}
 	}
 
+	return length;
+
+block_release:
+	for (; k < nr_bh; k++)
+		put_bh(bh[k]);
+out:
+	return length;
+}
+
+int squashfs_read_submit(struct super_block *sb, u64 index, int length,
+			int srclength, struct buffer_head **bh, int *nr_bh)
+{
+	struct squashfs_sb_info *msblk = sb->s_fs_info;
+	int offset = index & ((1 << msblk->devblksize_log2) - 1);
+	u64 cur_index = index >> msblk->devblksize_log2;
+	int bytes, b = 0, k = 0;
+
+	bytes = -offset;
+	if (length < 0 || length > srclength ||
+			(index + length) > msblk->bytes_used)
+		goto read_failure;
+
+	for (b = 0; bytes < length; b++, cur_index++) {
+		bh[b] = sb_getblk(sb, cur_index);
+		if (bh[b] == NULL)
+			goto block_release;
+		bytes += msblk->devblksize;
+	}
+
+	ll_rw_block(READ, b, bh);
+	*nr_bh = b;
+	return 0;
+
+block_release:
+	for (; k < b; k++)
+		put_bh(bh[k]);
+
+read_failure:
+	ERROR("squashfs_read_submit failed to read block 0x%llx\n",
+					(unsigned long long) index);
+	return -EIO;
+}
+
+/*
+ * Read and decompress a datablock. @length should be non-zero(the size is
+ * stored elsewhere in the filesystem). A bit in the length field indicates
+ * if the block is stored uncompressed in the filesystem (usually because
+ * compression generated a larger block - this does occasionally happen with
+ * compression algorithms).
+ */
+int squashfs_read_datablock(struct super_block *sb, void **buffer, u64 index,
+			int length, int srclength, int pages)
+{
+	struct squashfs_sb_info *msblk = sb->s_fs_info;
+	struct buffer_head **bh;
+	int offset = index & ((1 << msblk->devblksize_log2) - 1);
+	int compressed, ret, b = 0;
+
+	BUG_ON(!length);
+
+	bh = kcalloc(((srclength + msblk->devblksize - 1)
+		>> msblk->devblksize_log2) + 1, sizeof(*bh), GFP_KERNEL);
+	if (bh == NULL)
+		return -ENOMEM;
+
+	compressed = SQUASHFS_COMPRESSED_BLOCK(length);
+	length = SQUASHFS_COMPRESSED_SIZE_BLOCK(length);
+
+	ret = squashfs_read_submit(sb, index, length, srclength, bh, &b);
+	if (ret < 0) {
+		kfree(bh);
+		return ret;
+	}
+
+
+	TRACE("Data block @ 0x%llx, %scompressed size %d, src size %d\n",
+		index, compressed ? "" : "un", length, srclength);
+
+	length = squashfs_decompress_block(sb, compressed, buffer, bh,
+				b, offset, length, srclength, pages);
+	if (length < 0) {
+		ERROR("squashfs_read_datablock failed to read block 0x%llx\n",
+					(unsigned long long) index);
+		kfree(bh);
+		return -EIO;
+	}
+
+	kfree(bh);
+	return length;
+}
+
+/*
+ * Read and decompress a metadata block. @length is obtained from the first
+ * two bytes of the metadata block.  A bit in the length field indicates if
+ * the block is stored uncompressed in the filesystem (usually because
+ * compression generated a larger block - this does occasionally happen with
+ * compression algorithms).
+ */
+int squashfs_read_metablock(struct super_block *sb, void **buffer, u64 index,
+			int length, u64 *next_index, int srclength, int pages)
+{
+	struct squashfs_sb_info *msblk = sb->s_fs_info;
+	struct buffer_head **bh;
+	int offset = index & ((1 << msblk->devblksize_log2) - 1);
+	u64 cur_index = index >> msblk->devblksize_log2;
+	int bytes, compressed, b = 0, k = 0;
+
+	BUG_ON(length);
+
+	bh = kcalloc(((srclength + msblk->devblksize - 1)
+		>> msblk->devblksize_log2) + 1, sizeof(*bh), GFP_KERNEL);
+	if (bh == NULL)
+		return -ENOMEM;
+
+	if ((index + 2) > msblk->bytes_used)
+		goto read_failure;
+
+	bh[0] = get_block_length(sb, &cur_index, &offset, &length);
+	if (bh[0] == NULL)
+		goto read_failure;
+	b = 1;
+
+	bytes = msblk->devblksize - offset;
+	compressed = SQUASHFS_COMPRESSED(length);
+	length = SQUASHFS_COMPRESSED_SIZE(length);
+	if (next_index)
+		*next_index = index + length + 2;
+
+	TRACE("Meta block @ 0x%llx, %scompressed size %d\n", index,
+			compressed ? "" : "un", length);
+
+	if (length < 0 || length > srclength ||
+				(index + length) > msblk->bytes_used)
+		goto block_release;
+
+	for (; bytes < length; b++) {
+		bh[b] = sb_getblk(sb, ++cur_index);
+		if (bh[b] == NULL)
+			goto block_release;
+		bytes += msblk->devblksize;
+	}
+	ll_rw_block(READ, b - 1, bh + 1);
+
+	length = squashfs_decompress_block(msblk, compressed, buffer, bh, b,
+				offset, length, srclength, pages);
+	if (length < 0)
+		goto read_failure;
+
 	kfree(bh);
 	return length;
 
@@ -201,7 +275,7 @@ block_release:
 		put_bh(bh[k]);
 
 read_failure:
-	ERROR("squashfs_read_data failed to read block 0x%llx\n",
+	ERROR("squashfs_read_metablock failed to read block 0x%llx\n",
 					(unsigned long long) index);
 	kfree(bh);
 	return -EIO;

@@ -97,7 +97,7 @@ void *squashfs_decompressor_init(struct super_block *sb, unsigned short flags)
 		if (buffer == NULL)
 			return ERR_PTR(-ENOMEM);
 
-		length = squashfs_read_data(sb, &buffer,
+		length = squashfs_read_metablock(sb, &buffer,
 			sizeof(struct squashfs_super_block), 0, NULL,
 			PAGE_CACHE_SIZE, 1);
 

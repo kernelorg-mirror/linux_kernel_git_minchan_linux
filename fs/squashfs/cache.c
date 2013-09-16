@@ -119,9 +119,15 @@ struct squashfs_cache_entry *squashfs_cache_get(struct super_block *sb,
 			entry->error = 0;
 			spin_unlock(&cache->lock);
 
-			entry->length = squashfs_read_data(sb, entry->data,
-				block, length, &entry->next_index,
-				cache->block_size, cache->pages);
+			if (length)
+				entry->length = squashfs_read_datablock(sb,
+					entry->data, block, length,
+					cache->block_size, cache->pages);
+			else
+				entry->length = squashfs_read_metablock(sb,
+					entry->data, block, length,
+					&entry->next_index, cache->block_size,
+					cache->pages);
 
 			spin_lock(&cache->lock);
 
@@ -424,8 +430,8 @@ void *squashfs_read_table(struct super_block *sb, u64 block, int length)
 	for (i = 0; i < pages; i++, buffer += PAGE_CACHE_SIZE)
 		data[i] = buffer;
 
-	res = squashfs_read_data(sb, data, block, length |
-		SQUASHFS_COMPRESSED_BIT_BLOCK, NULL, length, pages);
+	res = squashfs_read_datablock(sb, data, block, length |
+		SQUASHFS_COMPRESSED_BIT_BLOCK, length, pages);
 
 	kfree(data);
 

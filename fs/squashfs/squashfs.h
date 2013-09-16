@@ -28,8 +28,12 @@
 #define WARNING(s, args...)	pr_warning("SQUASHFS: "s, ## args)
 
 /* block.c */
-extern int squashfs_read_data(struct super_block *, void **, u64, int, u64 *,
+extern int squashfs_read_datablock(struct super_block *, void **, u64, int,
 				int, int);
+extern int squashfs_read_metablock(struct super_block *, void **, u64, int,
+				u64 *, int, int);
+extern int squashfs_read_submit(struct super_block *, u64, int, int,
+				struct buffer_head **, int *);
 
 /* cache.c */
 extern struct squashfs_cache *squashfs_cache_init(char *, int, int);
