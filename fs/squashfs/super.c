@@ -84,7 +84,7 @@ static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 	unsigned short flags;
 	unsigned int fragments;
 	u64 lookup_table_start, xattr_id_table_start, next_table;
-	int err;
+	int err, i;
 
 	TRACE("Entered squashfs_fill_superblock\n");
 
@@ -98,7 +98,9 @@ static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 	msblk->devblksize = sb_min_blocksize(sb, SQUASHFS_DEVBLK_SIZE);
 	msblk->devblksize_log2 = ffz(~msblk->devblksize);
 
-	mutex_init(&msblk->read_data_mutex);
+	INIT_LIST_HEAD(&msblk->strm_list);
+	mutex_init(&msblk->comp_strm_mutex);
+	init_waitqueue_head(&msblk->decomp_wait_queue);
 	mutex_init(&msblk->meta_index_mutex);
 
 	/*
@@ -176,6 +178,7 @@ static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 	msblk->directory_table = le64_to_cpu(sblk->directory_table_start);
 	msblk->inodes = le32_to_cpu(sblk->inodes);
 	flags = le16_to_cpu(sblk->flags);
+	msblk->flags = flags;
 
 	TRACE("Found valid superblock on %s\n", bdevname(sb->s_bdev, b));
 	TRACE("Inodes are %scompressed\n", SQUASHFS_UNCOMPRESSED_INODES(flags)
@@ -212,11 +215,16 @@ static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 		goto failed_mount;
 	}
 
-	msblk->stream = squashfs_decompressor_init(sb, flags);
-	if (IS_ERR(msblk->stream)) {
-		err = PTR_ERR(msblk->stream);
-		msblk->stream = NULL;
-		goto failed_mount;
+	/* Allocate mutliple decompressor */
+	for (i = 0; i < num_online_cpus(); i++) {
+		struct squashfs_decomp_strm *decomp_strm;
+		decomp_strm = squashfs_decompressor_init(sb);
+		if (IS_ERR(decomp_strm)) {
+			err = PTR_ERR(decomp_strm);
+			goto failed_mount;
+		}
+		list_add(&decomp_strm->list, &msblk->strm_list);
+		msblk->nr_avail_decomp++;
 	}
 
 	/* Handle xattrs */
@@ -336,7 +344,14 @@ failed_mount:
 	squashfs_cache_delete(msblk->block_cache);
 	squashfs_cache_delete(msblk->fragment_cache);
 	squashfs_cache_delete(msblk->read_page);
-	squashfs_decompressor_free(msblk, msblk->stream);
+	while (!list_empty(&msblk->strm_list)) {
+		struct squashfs_decomp_strm *decomp_strm =
+			list_entry(msblk->strm_list.prev,
+					struct squashfs_decomp_strm, list);
+		list_del(&decomp_strm->list);
+		squashfs_decompressor_free(msblk, decomp_strm);
+	}
+	msblk->nr_avail_decomp = 0;
 	kfree(msblk->inode_lookup_table);
 	kfree(msblk->fragment_index);
 	kfree(msblk->id_table);
@@ -383,7 +398,14 @@ static void squashfs_put_super(struct super_block *sb)
 		squashfs_cache_delete(sbi->block_cache);
 		squashfs_cache_delete(sbi->fragment_cache);
 		squashfs_cache_delete(sbi->read_page);
-		squashfs_decompressor_free(sbi, sbi->stream);
+		while (!list_empty(&sbi->strm_list)) {
+			struct squashfs_decomp_strm *decomp_strm =
+				list_entry(sbi->strm_list.prev,
+					struct squashfs_decomp_strm, list);
+			list_del(&decomp_strm->list);
+			squashfs_decompressor_free(sbi, decomp_strm);
+		}
+		sbi->nr_avail_decomp = 0;
 		kfree(sbi->id_table);
 		kfree(sbi->fragment_index);
 		kfree(sbi->meta_index);

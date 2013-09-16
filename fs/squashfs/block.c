@@ -78,14 +78,14 @@ static struct buffer_head *get_block_length(struct super_block *sb,
 
 
 
-int squashfs_decompress_block(struct squashfs_sb_info *msblk, int compressed,
+int squashfs_decompress_block(struct super_block *sb, int compressed,
 		void **buffer, struct buffer_head **bh, int nr_bh,
 		int offset, int length, int srclength, int pages)
 {
 	int k = 0;
 
 	if (compressed) {
-		length = squashfs_decompress(msblk, buffer, bh, nr_bh,
+		length = squashfs_decompress(sb, buffer, bh, nr_bh,
 				offset, length, srclength, pages);
 		if (length < 0)
 			goto out;
@@ -93,6 +93,7 @@ int squashfs_decompress_block(struct squashfs_sb_info *msblk, int compressed,
 		/*
 		 * Block is uncompressed.
 		 */
+		struct squashfs_sb_info *msblk = sb->s_fs_info;
 		int bytes, in, avail, pg_offset = 0, page = 0;
 
 		for (bytes = length; k < nr_bh; k++) {
@@ -262,8 +263,8 @@ int squashfs_read_metablock(struct super_block *sb, void **buffer, u64 index,
 	}
 	ll_rw_block(READ, b - 1, bh + 1);
 
-	length = squashfs_decompress_block(msblk, compressed, buffer, bh, b,
-				offset, length, srclength, pages);
+	length = squashfs_decompress_block(sb, compressed, buffer, bh,
+				b, offset, length, srclength, pages);
 	if (length < 0)
 		goto read_failure;
 

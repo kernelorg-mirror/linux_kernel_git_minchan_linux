@@ -52,7 +52,8 @@ extern void *squashfs_read_table(struct super_block *, u64, int);
 
 /* decompressor.c */
 extern const struct squashfs_decompressor *squashfs_lookup_decompressor(int);
-extern void *squashfs_decompressor_init(struct super_block *, unsigned short);
+extern struct squashfs_decomp_strm *squashfs_decompressor_init(
+				struct super_block *);
 
 /* export.c */
 extern __le64 *squashfs_read_inode_lookup_table(struct super_block *, u64, u64,

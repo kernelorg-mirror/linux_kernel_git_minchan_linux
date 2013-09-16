@@ -61,15 +61,13 @@ static void zlib_free(void *strm)
 }
 
 
-static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
-	struct buffer_head **bh, int b, int offset, int length, int srclength,
-	int pages)
+static int zlib_uncompress(struct squashfs_sb_info *msblk, void *strm,
+		void **buffer, struct buffer_head **bh, int b, int offset,
+		int length, int srclength, int pages)
 {
 	int zlib_err, zlib_init = 0;
 	int k = 0, page = 0;
-	z_stream *stream = msblk->stream;
-
-	mutex_lock(&msblk->read_data_mutex);
+	z_stream *stream = strm;
 
 	stream->avail_out = 0;
 	stream->avail_in = 0;
@@ -126,11 +124,9 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 	}
 
 	length = stream->total_out;
-	mutex_unlock(&msblk->read_data_mutex);
 	return length;
 
 release_mutex:
-	mutex_unlock(&msblk->read_data_mutex);
 
 	for (; k < b; k++)
 		put_bh(bh[k]);

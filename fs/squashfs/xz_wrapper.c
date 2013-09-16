@@ -103,15 +103,13 @@ static void squashfs_xz_free(void *strm)
 }
 
 
-static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
-	struct buffer_head **bh, int b, int offset, int length, int srclength,
-	int pages)
+static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void *strm,
+		void **buffer, struct buffer_head **bh, int b, int offset,
+		int length, int srclength, int pages)
 {
 	enum xz_ret xz_err;
 	int avail, total = 0, k = 0, page = 0;
-	struct squashfs_xz *stream = msblk->stream;
-
-	mutex_lock(&msblk->read_data_mutex);
+	struct squashfs_xz *stream = strm;
 
 	xz_dec_reset(stream->state);
 	stream->buf.in_pos = 0;
@@ -126,7 +124,7 @@ static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			length -= avail;
 			wait_on_buffer(bh[k]);
 			if (!buffer_uptodate(bh[k]))
-				goto release_mutex;
+				goto out;
 
 			stream->buf.in = bh[k]->b_data + offset;
 			stream->buf.in_size = avail;
@@ -149,20 +147,18 @@ static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 
 	if (xz_err != XZ_STREAM_END) {
 		ERROR("xz_dec_run error, data probably corrupt\n");
-		goto release_mutex;
+		goto out;
 	}
 
 	if (k < b) {
 		ERROR("xz_uncompress error, input remaining\n");
-		goto release_mutex;
+		goto out;
 	}
 
 	total += stream->buf.out_pos;
-	mutex_unlock(&msblk->read_data_mutex);
 	return total;
 
-release_mutex:
-	mutex_unlock(&msblk->read_data_mutex);
+out:
 
 	for (; k < b; k++)
 		put_bh(bh[k]);
