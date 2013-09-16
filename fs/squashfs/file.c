@@ -47,6 +47,7 @@
 #include <linux/string.h>
 #include <linux/pagemap.h>
 #include <linux/mutex.h>
+#include <linux/swap.h>
 
 #include "squashfs_fs.h"
 #include "squashfs_fs_sb.h"
@@ -454,8 +455,55 @@ error_out:
 	return 0;
 }
 
-static int squashfs_hole_readpage(struct file *file, struct inode *inode,
-				int index, struct page *page)
+static int squashfs_hole_readpages(struct inode *inode, int index,
+				struct list_head *page_list)
+{
+	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+	int bytes, i, offset = 0;
+	void *pageaddr;
+	struct page *push_page;
+
+	int start_index = index << (msblk->block_log - PAGE_CACHE_SHIFT);
+	int file_end = i_size_read(inode) >> msblk->block_log;
+
+	bytes = index == file_end ?
+		(i_size_read(inode) & (msblk->block_size - 1)) :
+		 msblk->block_size;
+
+	/*
+	 * Loop copying datablock into pages.  As the datablock likely covers
+	 * many PAGE_CACHE_SIZE pages (default block size is 128 KiB) explicitly
+	 * grab the pages from the page cache, except for the page that we've
+	 * been called to fill.
+	 */
+	for (i = start_index; bytes > 0; i++,
+			bytes -= PAGE_CACHE_SIZE, offset += PAGE_CACHE_SIZE) {
+
+		push_page = list_entry(page_list->prev, struct page, lru);
+		list_del(&push_page->lru);
+
+		pageaddr = kmap_atomic(push_page);
+		memset(pageaddr, 0, PAGE_CACHE_SIZE);
+		kunmap_atomic(pageaddr);
+		flush_dcache_page(push_page);
+		SetPageUptodate(push_page);
+
+		lru_cache_add_file(push_page);
+		unlock_page(push_page);
+		page_cache_release(push_page);
+	}
+
+	while (!list_empty(page_list)) {
+		push_page = list_entry(page_list->prev, struct page, lru);
+		list_del(&push_page->lru);
+		page_cache_release(push_page);
+	}
+
+	return 0;
+}
+
+static int squashfs_hole_readpage(struct inode *inode, int index,
+				struct page *page)
 {
 	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
 	int bytes, i, offset = 0;
@@ -478,8 +526,8 @@ static int squashfs_hole_readpage(struct file *file, struct inode *inode,
 			bytes -= PAGE_CACHE_SIZE, offset += PAGE_CACHE_SIZE) {
 		struct page *push_page;
 
-		push_page = (page && i == page->index) ? page :
-			grab_cache_page_nowait(page->mapping, i);
+		push_page = (i == page->index) ? page :
+			grab_cache_page_nowait(inode->i_mapping, i);
 
 		if (!push_page)
 			continue;
@@ -494,7 +542,7 @@ static int squashfs_hole_readpage(struct file *file, struct inode *inode,
 		SetPageUptodate(push_page);
 skip_page:
 		unlock_page(push_page);
-		if (page && i == page->index)
+		if (i == page->index)
 			continue;
 		page_cache_release(push_page);
 	}
@@ -533,7 +581,7 @@ static int squashfs_regular_readpage(struct file *file, struct page *page)
 		goto error_out;
 
 	if (bsize == 0)
-		return squashfs_hole_readpage(file, inode, index, page);
+		return squashfs_hole_readpage(inode, index, page);
 
 	/*
 	 * Read and decompress data block
@@ -660,6 +708,391 @@ out:
 	return 0;
 }
 
+static int squashfs_ra_readblock(struct inode *inode, int index,
+			struct buffer_head **bh, int *nr_bh,
+			int *block_size, u64 *block)
+{
+	int bsize;
+	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+	int ret, b;
+
+	/*
+	 * Reading a datablock from disk.  Need to read block list
+	 * to get location and block size.
+	 */
+	*block_size = read_blocklist(inode, index, block);
+	if (*block_size < 0)
+		return 1;
+
+	if (*block_size == 0)
+		return 0;
+
+	bsize = SQUASHFS_COMPRESSED_SIZE_BLOCK(*block_size);
+	ret = squashfs_read_submit(inode->i_sb, *block, bsize,
+				msblk->block_size, bh, &b);
+	if (ret < 0)
+		return ret;
+
+	*nr_bh = b;
+	return 0;
+}
+
+struct squashfs_ra_private {
+	struct buffer_head **bh;
+	int nr_bh;
+	int block_size;
+	u64 block;
+	void **buffer;
+	struct page **page_array;
+};
+
+/* Caller should free buffer head */
+static int squashfs_ra_read_submit(struct inode *inode, int bindex,
+			struct squashfs_ra_private *ra_priv)
+{
+	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+	int ret;
+	struct buffer_head **bh;
+	int nr_bh = -1, bsize;
+	u64 block;
+	bh = kcalloc(((msblk->block_size + msblk->devblksize - 1)
+				>> msblk->devblksize_log2) + 1,
+				sizeof(*bh), GFP_KERNEL);
+	if (!bh)
+		return -ENOMEM;
+
+	ra_priv->bh = bh;
+	ret = squashfs_ra_readblock(inode, bindex, bh, &nr_bh,
+					&bsize, &block);
+	if (ret != 0)
+		goto release_bh;
+
+	ra_priv->nr_bh = nr_bh;
+	ra_priv->block_size = bsize;
+	ra_priv->block = block;
+
+	return 0;
+
+release_bh:
+	kfree(ra_priv->bh);
+	return ret;
+}
+
+static int squashfs_ra_decompress(struct inode *inode, int bindex,
+			struct squashfs_ra_private *ra_priv, gfp_t gfp_mask,
+			struct list_head *page_list)
+{
+	int j;
+	int ret = -ENOMEM;
+	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+	int pages_per_block;
+
+	void **buffer;
+	struct buffer_head **bh;
+	int block_size, nr_bh;
+	u64 block;
+	struct page **page_array, *page;
+
+	int compressed, offset, length;
+
+	pages_per_block = msblk->block_size >> PAGE_CACHE_SHIFT;
+	pages_per_block = pages_per_block ? pages_per_block : 1;
+
+	bh = ra_priv->bh;
+	block_size = ra_priv->block_size;
+	nr_bh = ra_priv->nr_bh;
+	block = ra_priv->block;
+
+	if (block_size == 0)
+		return squashfs_hole_readpages(inode, bindex, page_list);
+
+	buffer = kcalloc(1 << (msblk->block_log - PAGE_CACHE_SHIFT),
+					sizeof(void *), GFP_KERNEL);
+	if (!buffer)
+		goto out;
+	ra_priv->buffer = buffer;
+
+	page_array = kcalloc(1 << (msblk->block_log - PAGE_CACHE_SHIFT),
+					sizeof(struct page *), GFP_KERNEL);
+	if (!page_array)
+		goto release_buffer;
+	ra_priv->page_array = page_array;
+
+	/* alloc buffer pages */
+	for (j = 0; j < pages_per_block; j++) {
+		page = list_entry(page_list->prev, struct page, lru);
+		list_del(&page->lru);
+		buffer[j] = kmap(page);
+		page_array[j] = page;
+	}
+
+	compressed = SQUASHFS_COMPRESSED_BLOCK(block_size);
+	length = SQUASHFS_COMPRESSED_SIZE_BLOCK(block_size);
+
+	offset = block & ((1 << msblk->devblksize_log2) - 1);
+	length = squashfs_decompress_block(inode->i_sb, compressed, buffer,
+				bh, nr_bh, offset, length, msblk->block_size,
+				pages_per_block);
+
+	for (j = 0; j < pages_per_block; j++) {
+		page = page_array[j];
+		flush_dcache_page(page);
+		SetPageUptodate(page);
+		lru_cache_add_file(page);
+		if (!PageLocked(page))
+			printk("unlock page %p j %d\n", page, j);
+		unlock_page(page);
+	}
+
+	ret = 0;
+
+release_buffer:
+	if (ra_priv->buffer) {
+		for (j = 0; j < pages_per_block; j++) {
+			if (!ra_priv->buffer[j])
+				break;
+			kunmap(ra_priv->page_array[j]);
+			page_cache_release(ra_priv->page_array[j]);
+		}
+		kfree(ra_priv->page_array);
+	}
+
+	kfree(ra_priv->buffer);
+out:
+	return ret;
+}
+
+/*
+ * Fill hole pages between page_index and last_page_index
+ * Return 0 if function is successful, otherwise, return 1
+ * All pages are locked and added into page cache so that caller should
+ * add them into LRU and unlock.
+ */
+int hole_plugging(struct squashfs_sb_info *msblk, struct list_head *page_list,
+				int start_bindex, int last_bindex,
+				struct address_space *mapping)
+{
+	struct page *page, *tmp_page, *hpage, *tpage;
+	int page_index, last_page_index;
+	gfp_t gfp_mask = mapping_gfp_mask(mapping);
+
+	page_index = start_bindex << (msblk->block_log - PAGE_CACHE_SHIFT);
+	last_page_index = ((last_bindex + 1) <<
+			(msblk->block_log - PAGE_CACHE_SHIFT));
+	
+	hpage = list_entry(page_list->prev, struct page, lru);
+	for (; page_index < hpage->index; page_index++) {
+		struct page *new_page = page_cache_alloc_readahead(mapping);
+		if (!new_page)
+			return 1;
+		new_page->index = page_index;
+		list_add(&new_page->lru, &hpage->lru);
+	}
+
+	tpage = list_entry(page_list->next, struct page, lru);
+	page_index = tpage->index + 1;
+	for (; page_index < last_page_index; page_index++) {
+		struct page *new_page = page_cache_alloc_readahead(mapping);
+		if (!new_page)
+			return 1;
+		new_page->index = page_index;
+		list_add(&new_page->lru, page_list);
+	}
+
+	list_for_each_entry_reverse(page, page_list, lru)
+		if (add_to_page_cache(page, mapping, page->index, gfp_mask))
+			goto remove_pagecache;
+	return 0;
+
+remove_pagecache:
+	list_for_each_entry_reverse(tmp_page, page_list, lru) {
+		if (tmp_page == page)
+			break;
+		delete_from_page_cache(tmp_page);
+		unlock_page(tmp_page);
+	}
+	return 1;
+}
+
+struct decomp_work {
+	struct inode *inode;
+	int bindex;
+	struct list_head list;
+	struct list_head pages;
+	struct squashfs_ra_private *ra_priv;
+	gfp_t gfp_mask;
+};
+
+void squashfs_decomp_work(struct work_struct *work)
+{
+	struct inode *inode;
+	struct list_head *pages;
+	struct squashfs_ra_private *ra_priv;
+	struct decomp_work *decomp_work;
+	gfp_t gfp_mask;
+	int bindex;
+	struct squashfs_sb_info *msblk =
+		container_of(work, struct squashfs_sb_info, delay_work.work);
+
+	for (;;) {
+		decomp_work = NULL;
+		spin_lock(&msblk->decomp_lock);
+		if (!list_empty(&msblk->decomp_list)) {
+			decomp_work = list_entry(msblk->decomp_list.prev,
+					struct decomp_work, list);
+			list_del(&decomp_work->list);
+		}
+		spin_unlock(&msblk->decomp_lock);
+		if (!decomp_work)
+			return;
+
+		inode = decomp_work->inode;
+		bindex = decomp_work->bindex;
+		ra_priv = decomp_work->ra_priv;
+		gfp_mask = decomp_work->gfp_mask;
+		pages = &decomp_work->pages;
+
+		if (squashfs_ra_decompress(inode, bindex, ra_priv,
+						gfp_mask, pages)) {
+			struct page *page, *tmp;
+			list_for_each_entry_safe_reverse(page, tmp,
+							pages, lru) {
+				list_del(&page->lru);
+				delete_from_page_cache(page);
+				unlock_page(page);
+				page_cache_release(page);
+			}
+		}
+
+		kfree(ra_priv->bh);
+		kfree(ra_priv);
+		kfree(decomp_work);
+	}
+}
+
+static int move_pages(struct list_head *page_list, struct list_head *pages,
+				int nr)
+{
+	int moved_pages = 0;
+	struct page *page, *tmp_page;
+	list_for_each_entry_safe_reverse(page, tmp_page,
+						page_list, lru) {
+		list_move(&page->lru, pages);
+		moved_pages++;
+		if (moved_pages == nr)
+			break;
+	}
+
+	return moved_pages;
+}
+
+static int squashfs_readpages(struct file *file, struct address_space *mapping,
+		struct list_head *page_list, unsigned nr_pages)
+{
+	struct inode *inode = mapping->host;
+	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+	struct page *hpage, *tpage, *page;
+	struct decomp_work **work;
+	int start_bindex, last_bindex;
+	struct squashfs_ra_private **ra_priv;
+	int pages_per_block, i, ret = -ENOMEM;
+	gfp_t gfp_mask;
+	int nr_blocks;
+
+	gfp_mask = mapping_gfp_mask(mapping);
+
+	hpage = list_entry(page_list->prev, struct page, lru);
+	tpage = list_entry(page_list->next, struct page, lru);
+
+	start_bindex = hpage->index >> (msblk->block_log - PAGE_CACHE_SHIFT);
+	last_bindex = tpage->index >> (msblk->block_log - PAGE_CACHE_SHIFT);
+
+	if (last_bindex >= (i_size_read(inode) >> msblk->block_log))
+		return 0;
+
+	/* fill with pages for readahead  */
+	if (hole_plugging(msblk, page_list, start_bindex,
+					last_bindex, mapping)) {
+		ret = 0;
+		goto out;
+	}
+
+	nr_blocks = last_bindex - start_bindex + 1;
+	ra_priv = kcalloc(nr_blocks, sizeof(*ra_priv), GFP_KERNEL);
+	if (!ra_priv)
+		goto remove_pagecache;
+
+	for (i = 0; i < nr_blocks; i++) {
+		ra_priv[i] = kmalloc(sizeof(**ra_priv),	GFP_KERNEL);
+		if (ra_priv[i] == NULL)
+			goto release_ra_priv;
+	}
+
+	work = kcalloc(nr_blocks, sizeof(*work), GFP_KERNEL);
+	if (!work)
+		goto release_ra_priv;
+
+	for (i = 0; i < nr_blocks; i++) {
+		work[i] = kmalloc(sizeof(**work), GFP_KERNEL);
+		if (!work[i])
+			goto release_work;
+	}
+
+	for (i = 0; i < nr_blocks; i++) {
+		ret = squashfs_ra_read_submit(inode, start_bindex + i ,
+							ra_priv[i]);
+		if (ret)
+			goto release_ra_priv;
+	}
+
+	ret = 0;
+
+	queue_delayed_work(system_unbound_wq, &msblk->delay_work,
+		msecs_to_jiffies(3));
+
+	pages_per_block = msblk->block_size >> PAGE_CACHE_SHIFT;
+	pages_per_block = pages_per_block ? pages_per_block : 1;
+
+	for (i = 0; i < nr_blocks; i++) {
+		struct decomp_work *decomp_work = work[i];
+
+		INIT_LIST_HEAD(&decomp_work->pages);
+		decomp_work->bindex = start_bindex + i;
+		decomp_work->ra_priv = ra_priv[i];
+		decomp_work->gfp_mask = gfp_mask;
+		decomp_work->inode = inode;
+
+		move_pages(page_list, &decomp_work->pages,
+			pages_per_block);
+
+		spin_lock(&msblk->decomp_lock);
+		list_add(&decomp_work->list, &msblk->decomp_list);
+		spin_unlock(&msblk->decomp_lock);
+	}
+
+	kfree(ra_priv);
+	kfree(work);
+
+	return ret;
+
+release_work:
+	for (i = 0; i < nr_blocks; i++)
+		kfree(work[i]);
+	kfree(work);
+release_ra_priv:
+	for (i = 0; i < nr_blocks; i++)
+		kfree(ra_priv[i]);
+	kfree(ra_priv);
+remove_pagecache:
+	list_for_each_entry_reverse(page, page_list, lru) {
+		delete_from_page_cache(page);
+		unlock_page(page);
+	}
+out:
+	return ret;
+}
+
 const struct address_space_operations squashfs_aops = {
-	.readpage = squashfs_readpage
+	.readpage = squashfs_readpage,
+	.readpages = squashfs_readpages,
 };

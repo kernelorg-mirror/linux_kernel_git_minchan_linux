@@ -73,7 +73,6 @@ static const struct squashfs_decompressor *supported_squashfs_filesystem(short
 	return decompressor;
 }
 
-
 static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct squashfs_sb_info *msblk;
@@ -98,6 +97,9 @@ static int squashfs_fill_super(struct super_block *sb, void *data, int silent)
 	msblk->devblksize = sb_min_blocksize(sb, SQUASHFS_DEVBLK_SIZE);
 	msblk->devblksize_log2 = ffz(~msblk->devblksize);
 
+	spin_lock_init(&msblk->decomp_lock);
+	INIT_DELAYED_WORK(&msblk->delay_work, squashfs_decomp_work);
+	INIT_LIST_HEAD(&msblk->decomp_list);
 	INIT_LIST_HEAD(&msblk->strm_list);
 	mutex_init(&msblk->comp_strm_mutex);
 	init_waitqueue_head(&msblk->decomp_wait_queue);

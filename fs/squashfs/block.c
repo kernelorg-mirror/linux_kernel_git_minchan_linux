@@ -76,8 +76,6 @@ static struct buffer_head *get_block_length(struct super_block *sb,
 	return bh;
 }
 
-
-
 int squashfs_decompress_block(struct super_block *sb, int compressed,
 		void **buffer, struct buffer_head **bh, int nr_bh,
 		int offset, int length, int srclength, int pages)

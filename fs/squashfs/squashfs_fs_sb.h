@@ -79,5 +79,9 @@ struct squashfs_sb_info {
 	wait_queue_head_t			decomp_wait_queue;
 	int					nr_avail_decomp;
 	unsigned short				flags;
+
+	struct delayed_work			delay_work;
+	spinlock_t				decomp_lock;
+	struct list_head			decomp_list;
 };
 #endif
