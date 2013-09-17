@@ -1007,6 +1007,24 @@ static int squashfs_readpages(struct file *file, struct address_space *mapping,
 	start_bindex = hpage->index >> (msblk->block_log - PAGE_CACHE_SHIFT);
 	last_bindex = tpage->index >> (msblk->block_log - PAGE_CACHE_SHIFT);
 
+	/*
+	 * Normally, MM readahread window is smaller than our compressed
+	 * block size. In that case, plugging could hurt performance so
+	 * let's do synchronous read in that case.
+	 */
+	if (start_bindex == last_bindex) {
+		list_del(&hpage->lru);
+		if (add_to_page_cache_lru(hpage, mapping, hpage->index,
+				GFP_KERNEL)) {
+			page_cache_release(hpage);
+			return 0;
+		}
+
+		ret = squashfs_readpage(file, hpage);
+		page_cache_release(hpage);
+		return ret;
+	}
+
 	if (last_bindex >= (i_size_read(inode) >> msblk->block_log))
 		return 0;
 
