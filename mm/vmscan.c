@@ -43,6 +43,7 @@
 #include <linux/sysctl.h>
 #include <linux/oom.h>
 #include <linux/prefetch.h>
+#include <linux/vrange.h>
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -665,6 +666,7 @@ enum page_references {
 	PAGEREF_RECLAIM,
 	PAGEREF_RECLAIM_CLEAN,
 	PAGEREF_KEEP,
+	PAGEREF_DISCARD,
 	PAGEREF_ACTIVATE,
 };
 
@@ -684,6 +686,13 @@ static enum page_references page_check_references(struct page *page,
 	 */
 	if (vm_flags & VM_LOCKED)
 		return PAGEREF_RECLAIM;
+
+	/*
+	 * If volatile page is reached on LRU's tail, we discard the
+	 * page without considering recycle the page.
+	 */
+	if (vm_flags & VM_VRANGE)
+		return PAGEREF_DISCARD;
 
 	if (referenced_ptes) {
 		if (PageSwapBacked(page))
@@ -912,6 +921,14 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		switch (references) {
 		case PAGEREF_ACTIVATE:
 			goto activate_locked;
+		/*
+		 * NOTE: Do not change case ordering.
+		 * If you should change, update mapping after discard_vpage
+		 * because page->mapping could be NULL if it's purged.
+		 */
+		case PAGEREF_DISCARD:
+			if (may_enter_fs && discard_vpage(page) == 0)
+				goto free_it;
 		case PAGEREF_KEEP:
 			goto keep_locked;
 		case PAGEREF_RECLAIM:
