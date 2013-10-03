@@ -57,6 +57,7 @@
 #include <linux/migrate.h>
 #include <linux/hugetlb.h>
 #include <linux/backing-dev.h>
+#include <linux/vrange.h>
 
 #include <asm/tlbflush.h>
 
@@ -662,7 +663,7 @@ int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma)
  */
 int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			unsigned long address, unsigned int *mapcount,
-			unsigned long *vm_flags)
+			unsigned long *vm_flags, int *is_vrange)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	int referenced = 0;
@@ -724,6 +725,11 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 				referenced++;
 		}
 		pte_unmap_unlock(pte, ptl);
+		if (is_vrange && vrange_addr_volatile(vma, address)) {
+			*is_vrange = 1;
+			*mapcount = 0; /* break ealry from loop */
+			goto out;
+		}
 	}
 
 	(*mapcount)--;
@@ -736,7 +742,7 @@ out:
 
 static int page_referenced_anon(struct page *page,
 				struct mem_cgroup *memcg,
-				unsigned long *vm_flags)
+				unsigned long *vm_flags, int *is_vrange)
 {
 	unsigned int mapcount;
 	struct anon_vma *anon_vma;
@@ -761,7 +767,8 @@ static int page_referenced_anon(struct page *page,
 		if (memcg && !mm_match_cgroup(vma->vm_mm, memcg))
 			continue;
 		referenced += page_referenced_one(page, vma, address,
-						  &mapcount, vm_flags);
+						  &mapcount, vm_flags,
+						  is_vrange);
 		if (!mapcount)
 			break;
 	}
@@ -785,7 +792,7 @@ static int page_referenced_anon(struct page *page,
  */
 static int page_referenced_file(struct page *page,
 				struct mem_cgroup *memcg,
-				unsigned long *vm_flags)
+				unsigned long *vm_flags, int *is_vrange)
 {
 	unsigned int mapcount;
 	struct address_space *mapping = page->mapping;
@@ -826,7 +833,8 @@ static int page_referenced_file(struct page *page,
 		if (memcg && !mm_match_cgroup(vma->vm_mm, memcg))
 			continue;
 		referenced += page_referenced_one(page, vma, address,
-						  &mapcount, vm_flags);
+						  &mapcount, vm_flags,
+						  is_vrange);
 		if (!mapcount)
 			break;
 	}
@@ -841,6 +849,7 @@ static int page_referenced_file(struct page *page,
  * @is_locked: caller holds lock on the page
  * @memcg: target memory cgroup
  * @vm_flags: collect encountered vma->vm_flags who actually referenced the page
+ * @is_vrange: Is @page in vrange?
  *
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
@@ -848,7 +857,8 @@ static int page_referenced_file(struct page *page,
 int page_referenced(struct page *page,
 		    int is_locked,
 		    struct mem_cgroup *memcg,
-		    unsigned long *vm_flags)
+		    unsigned long *vm_flags,
+		    int *is_vrange)
 {
 	int referenced = 0;
 	int we_locked = 0;
@@ -867,10 +877,12 @@ int page_referenced(struct page *page,
 								vm_flags);
 		else if (PageAnon(page))
 			referenced += page_referenced_anon(page, memcg,
-								vm_flags);
+								vm_flags,
+								is_vrange);
 		else if (page->mapping)
 			referenced += page_referenced_file(page, memcg,
-								vm_flags);
+								vm_flags,
+								is_vrange);
 		if (we_locked)
 			unlock_page(page);
 
