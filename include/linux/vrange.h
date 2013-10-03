@@ -37,12 +37,17 @@ static inline int vrange_type(struct vrange *vrange)
 }
 
 extern void vrange_root_cleanup(struct vrange_root *vroot);
-
+extern int vrange_fork(struct mm_struct *new,
+					struct mm_struct *old);
 #else
 
 static inline void vrange_root_init(struct vrange_root *vroot,
 					int type, void *object) {};
 static inline void vrange_root_cleanup(struct vrange_root *vroot) {};
+static inline int vrange_fork(struct mm_struct *new, struct mm_struct *old)
+{
+	return 0;
+}
 
 #endif
 #endif /* _LINIUX_VRANGE_H */
