@@ -182,3 +182,43 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 	vrange_unlock(vroot);
 }
 
+/*
+ * It's okay to fail vrange_fork because worst case is child process
+ * can't have copied own vrange data structure so that pages in the
+ * vrange couldn't be purged. It would be better rather than failing
+ * fork.
+ */
+int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
+{
+	struct vrange_root *new, *old;
+	struct vrange *range, *new_range;
+	struct rb_node *next;
+
+	new = &new_mm->vroot;
+	old = &old_mm->vroot;
+
+	vrange_lock(old);
+	next = rb_first(&old->v_rb);
+	while (next) {
+		range = vrange_entry(next);
+		next = rb_next(next);
+		/*
+		 * We can't use GFP_KERNEL because direct reclaim's
+		 * purging logic on vrange could be deadlock by
+		 * vrange_lock.
+		 */
+		new_range = __vrange_alloc(GFP_NOIO);
+		if (!new_range)
+			goto fail;
+		__vrange_set(new_range, range->node.start,
+					range->node.last, range->purged);
+		__vrange_add(new_range, new);
+
+	}
+	vrange_unlock(old);
+	return 0;
+fail:
+	vrange_unlock(old);
+	vrange_root_cleanup(new);
+	return -ENOMEM;
+}
