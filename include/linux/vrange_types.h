@@ -14,6 +14,7 @@ struct vrange_root {
 	struct mutex v_lock;		/* Protect v_rb */
 	enum vrange_type type;		/* range root type */
 	void *object;			/* pointer to mm_struct or mapping */
+	atomic_t refcount;
 };
 
 struct vrange {

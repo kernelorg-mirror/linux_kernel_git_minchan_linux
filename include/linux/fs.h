@@ -415,7 +415,7 @@ struct address_space {
 	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */
 	struct mutex		i_mmap_mutex;	/* protect tree, count, list */
 #ifdef CONFIG_MMU
-	struct vrange_root	vroot;
+	struct vrange_root	*vroot;
 #endif
 	/* Protected by tree_lock together with the radix tree */
 	unsigned long		nrpages;	/* number of total pages */

@@ -1505,7 +1505,7 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 munmap_back:
 
 	/* zap any volatile ranges */
-	vrange_clear(&mm->vroot, addr, addr + len);
+	vrange_clear(mm->vroot, addr, addr + len);
 
 	if (find_vma_links(mm, addr, addr + len, &prev, &rb_link, &rb_parent)) {
 		if (do_munmap(mm, addr, len))

@@ -351,7 +351,7 @@ struct mm_struct {
 
 
 #ifdef CONFIG_MMU
-	struct vrange_root vroot;
+	struct vrange_root *vroot;
 #endif
 	unsigned long hiwater_rss;	/* High-watermark of RSS usage */
 	unsigned long hiwater_vm;	/* High-water virtual memory usage */
