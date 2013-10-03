@@ -915,6 +915,10 @@ int discard_vpage(struct page *page)
 
 		if (page_freeze_refs(page, 1)) {
 			unlock_page(page);
+			if (current_is_kswapd())
+				count_vm_event(PGDISCARD_KSWAPD);
+			else
+				count_vm_event(PGDISCARD_DIRECT);
 			return 0;
 		}
 	}
@@ -1171,6 +1175,12 @@ static int discard_vrange(struct vrange *vrange)
 		ret = __discard_vrange_file(mapping, vrange, &nr_discard);
 	}
 
+	if (!ret) {
+		if (current_is_kswapd())
+			count_vm_events(PGDISCARD_KSWAPD, nr_discard);
+		else
+			count_vm_events(PGDISCARD_DIRECT, nr_discard);
+	}
 out:
 	__vroot_put(vroot);
 	return nr_discard;
