@@ -17,7 +17,7 @@ static struct kmem_cache *vrange_cachep;
 static struct vrange_list {
 	struct list_head list;
 	unsigned long size;
-	struct mutex lock;
+	spinlock_t lock;
 } vrange_list;
 
 static inline unsigned int vrange_size(struct vrange *range)
@@ -25,11 +25,26 @@ static inline unsigned int vrange_size(struct vrange *range)
 	return range->node.last + 1 - range->node.start;
 }
 
+static unsigned long shrink_vrange_count(struct shrinker *shrink,
+					struct shrink_control *sc);
+static unsigned long shrink_vrange_object(struct shrinker *s,
+					struct shrink_control *sc);
+
+static struct shrinker vrange_shrinker = {
+	.count_objects = shrink_vrange_count,
+	.scan_objects = shrink_vrange_object,
+	.seeks = DEFAULT_SEEKS
+};
+
 static int __init vrange_init(void)
 {
 	INIT_LIST_HEAD(&vrange_list.list);
-	mutex_init(&vrange_list.lock);
+	spin_lock_init(&vrange_list.lock);
+	vroot_cachep = kmem_cache_create("vrange_root",
+				sizeof(struct vrange_root), 0,
+				SLAB_DESTROY_BY_RCU|SLAB_PANIC, vroot_ctor);
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
+	register_shrinker(&vrange_shrinker);
 	return 0;
 }
 module_init(vrange_init);
@@ -57,22 +72,27 @@ static void __vrange_free(struct vrange *range)
 
 static inline void __vrange_lru_add(struct vrange *range)
 {
-	mutex_lock(&vrange_list.lock);
-	WARN_ON(!list_empty(&range->lru));
-	list_add(&range->lru, &vrange_list.list);
-	vrange_list.size += vrange_size(range);
-	mutex_unlock(&vrange_list.lock);
+	spin_lock(&vrange_list.lock);
+	/*
+	 * We need this check because it could be raced with
+	 * shrink_vrange_object and vrange_resize
+	 */
+	if (list_empty(&range->lru)) {
+		list_add(&range->lru, &vrange_list.list);
+		vrange_list.size += vrange_size(range);
+	}
+	spin_unlock(&vrange_list.lock);
 }
 
 static inline void __vrange_lru_del(struct vrange *range)
 {
-	mutex_lock(&vrange_list.lock);
+	spin_lock(&vrange_list.lock);
 	if (!list_empty(&range->lru)) {
 		list_del_init(&range->lru);
 		vrange_list.size -= vrange_size(range);
 		WARN_ON(range->owner);
 	}
-	mutex_unlock(&vrange_list.lock);
+	spin_unlock(&vrange_list.lock);
 }
 
 static void __vrange_add(struct vrange *range, struct vrange_root *vroot)
@@ -82,6 +102,14 @@ static void __vrange_add(struct vrange *range, struct vrange_root *vroot)
 
 	WARN_ON(atomic_read(&range->refcount) <= 0);
 	__vrange_lru_add(range);
+}
+
+static inline int __vrange_get(struct vrange *vrange)
+{
+	if (!atomic_inc_not_zero(&vrange->refcount))
+		return 0;
+
+	return 1;
 }
 
 static inline void __vrange_put(struct vrange *range)
@@ -653,4 +681,79 @@ int discard_vpage(struct page *page)
 	}
 
 	return 1;
+}
+
+static struct vrange *vrange_isolate(void)
+{
+	struct vrange *vrange = NULL;
+	spin_lock(&vrange_list.lock);
+	while (!list_empty(&vrange_list.list)) {
+		vrange = list_entry(vrange_list.list.prev,
+				struct vrange, lru);
+		list_del_init(&vrange->lru);
+		vrange_list.size -= vrange_size(vrange);
+
+		/* vrange is going to destroy */
+		if (__vrange_get(vrange))
+			break;
+
+		vrange = NULL;
+	}
+
+	spin_unlock(&vrange_list.lock);
+	return vrange;
+}
+
+static unsigned int discard_vrange(struct vrange *vrange)
+{
+	return 0;
+}
+
+static unsigned long shrink_vrange_count(struct shrinker *shrink,
+					struct shrink_control *sc)
+{
+	return vrange_list.size;
+}
+
+static unsigned long shrink_vrange_object(struct shrinker *s,
+					struct shrink_control *sc)
+{
+	unsigned long freed = 0;
+	struct vrange *range = NULL;
+	unsigned long nr_to_scan = sc->nr_to_scan;
+	unsigned long long list_size = vrange_list.size;
+
+	if (!(sc->gfp_mask & __GFP_IO))
+		return SHRINK_STOP;
+
+	if (!list_size)
+		return SHRINK_STOP;
+
+	while (list_size > 0 && nr_to_scan > 0) {
+		unsigned long free;
+		range = vrange_isolate();
+		if (!range)
+			break;
+
+		/* range is removing so don't bother */
+		if (!range->owner) {
+			__vrange_put(range);
+			free = vrange_size(range);
+			freed += free;
+			list_size -= free;
+			nr_to_scan -= free;
+			continue;
+		}
+
+		if (discard_vrange(range) < 0)
+			__vrange_lru_add(range);
+		__vrange_put(range);
+
+		free = vrange_size(range);
+		freed += free;
+		list_size -= free;
+		nr_to_scan -= free;
+	}
+
+	return freed;
 }
