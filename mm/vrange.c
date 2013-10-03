@@ -4,6 +4,8 @@
 
 #include <linux/vrange.h>
 #include <linux/slab.h>
+#include <linux/syscalls.h>
+#include <linux/mman.h>
 
 static struct kmem_cache *vrange_cachep;
 
@@ -229,4 +231,166 @@ fail:
 	vrange_unlock(old);
 	vrange_root_cleanup(new);
 	return -ENOMEM;
+}
+
+static inline struct vrange_root *__vma_to_vroot(struct vm_area_struct *vma)
+{
+	struct vrange_root *vroot = NULL;
+
+	if (vma->vm_file && (vma->vm_flags & VM_SHARED))
+		vroot = &vma->vm_file->f_mapping->vroot;
+	else
+		vroot = &vma->vm_mm->vroot;
+	return vroot;
+}
+
+static inline unsigned long __vma_addr_to_index(struct vm_area_struct *vma,
+							unsigned long addr)
+{
+	if (vma->vm_file && (vma->vm_flags & VM_SHARED))
+		return (vma->vm_pgoff << PAGE_SHIFT) + addr - vma->vm_start;
+	return addr;
+}
+
+static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
+				unsigned long end_idx, int mode, int *purged)
+{
+	struct vm_area_struct *vma;
+	unsigned long orig_start = start_idx;
+	ssize_t count = 0, ret = 0;
+
+	down_read(&mm->mmap_sem);
+
+	vma = find_vma(mm, start_idx);
+	for (;;) {
+		struct vrange_root *vroot;
+		unsigned long tmp, vstart_idx, vend_idx;
+
+		if (!vma)
+			goto out;
+
+		if (vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|
+					VM_HUGETLB))
+			goto out;
+
+		/* make sure start is at the front of the current vma*/
+		if (start_idx < vma->vm_start) {
+			start_idx = vma->vm_start;
+			if (start_idx > end_idx)
+				goto out;
+		}
+
+		/* bound tmp to closer of vm_end & end */
+		tmp = vma->vm_end - 1;
+		if (end_idx < tmp)
+			tmp = end_idx;
+
+		vroot = __vma_to_vroot(vma);
+		vstart_idx = __vma_addr_to_index(vma, start_idx);
+		vend_idx = __vma_addr_to_index(vma, tmp);
+
+		/* mark or unmark */
+		if (mode == VRANGE_VOLATILE)
+			ret = vrange_add(vroot, vstart_idx, vend_idx);
+		else if (mode == VRANGE_NONVOLATILE)
+			ret = vrange_remove(vroot, vstart_idx, vend_idx,
+						purged);
+
+		if (ret)
+			goto out;
+
+		/* update count to distance covered so far*/
+		count = tmp - orig_start + 1;
+
+		/* move start up to the end of the vma*/
+		start_idx = vma->vm_end;
+		if (start_idx > end_idx)
+			goto out;
+		/* move to the next vma */
+		vma = vma->vm_next;
+	}
+out:
+	up_read(&mm->mmap_sem);
+
+	/* report bytes successfully marked, even if we're exiting on error */
+	if (count)
+		return count;
+
+	return ret;
+}
+
+/*
+ * The vrange(2) system call.
+ *
+ * Applications can use vrange() to advise the kernel how it should
+ * handle paging I/O in this VM area.  The idea is to help the kernel
+ * discard pages of vrange instead of swapping out when memory pressure
+ * happens. The information provided is advisory only, and can be safely
+ * disregarded by the kernel if system has enough free memory.
+ *
+ * mode values:
+ *  VRANGE_VOLATILE - hint to kernel so VM can discard vrange pages when
+ *		memory pressure happens.
+ *  VRANGE_NONVOLATILE - Removes any volatile hints previous specified in that
+ *		range.
+ *
+ * purged ptr:
+ *  Returns 1 if any page in the range being marked nonvolatile has been purged.
+ *
+ * Return values:
+ *  On success vrange returns the number of bytes marked or unmarked.
+ *  Similar to write(), it may return fewer bytes then specified if
+ *  it ran into a problem.
+ *
+ *  If an error is returned, no changes were made.
+ *
+ * Errors:
+ *  -EINVAL - start  len < 0, start is not page-aligned, start is greater
+ *		than TASK_SIZE or "mode" is not a valid value.
+ *  -ENOMEM - Short of free memory in system for successful system call.
+ *  -EFAULT - Purged pointer is invalid.
+ *  -ENOSUP - Feature not yet supported.
+ */
+SYSCALL_DEFINE4(vrange, unsigned long, start,
+		size_t, len, int, mode, int __user *, purged)
+{
+	unsigned long end;
+	struct mm_struct *mm = current->mm;
+	ssize_t ret = -EINVAL;
+	int p = 0;
+
+	if (start & ~PAGE_MASK)
+		goto out;
+
+	len &= PAGE_MASK;
+	if (!len)
+		goto out;
+
+	end = start + len;
+	if (end < start)
+		goto out;
+
+	if (start >= TASK_SIZE)
+		goto out;
+
+	if (purged) {
+		/* Test pointer is valid before making any changes */
+		if (put_user(p, purged))
+			return -EFAULT;
+	}
+
+	ret = do_vrange(mm, start, end - 1, mode, &p);
+
+	if (purged) {
+		if (put_user(p, purged)) {
+			/*
+			 * This would be bad, since we've modified volatilty
+			 * and the change in purged state would be lost.
+			 */
+			BUG();
+		}
+	}
+
+out:
+	return ret;
 }

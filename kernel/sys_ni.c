@@ -175,6 +175,7 @@ cond_syscall(sys_mremap);
 cond_syscall(sys_remap_file_pages);
 cond_syscall(compat_sys_move_pages);
 cond_syscall(compat_sys_migrate_pages);
+cond_syscall(sys_vrange);
 
 /* block-layer dependent */
 cond_syscall(sys_bdflush);
