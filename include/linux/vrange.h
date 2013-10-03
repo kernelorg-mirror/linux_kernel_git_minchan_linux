@@ -41,6 +41,9 @@ extern int vrange_clear(struct vrange_root *vroot,
 extern void vrange_root_cleanup(struct vrange_root *vroot);
 extern int vrange_fork(struct mm_struct *new,
 					struct mm_struct *old);
+int discard_vpage(struct page *page);
+bool vrange_addr_volatile(struct vm_area_struct *vma, unsigned long addr);
+
 #else
 
 static inline void vrange_root_init(struct vrange_root *vroot,
@@ -51,5 +54,11 @@ static inline int vrange_fork(struct mm_struct *new, struct mm_struct *old)
 	return 0;
 }
 
+static inline bool vrange_addr_volatile(struct vm_area_struct *vma,
+					unsigned long addr)
+{
+	return false;
+}
+static inline int discard_vpage(struct page *page) { return 0 };
 #endif
 #endif /* _LINIUX_VRANGE_H */
