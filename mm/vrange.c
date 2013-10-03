@@ -13,6 +13,8 @@
 #include <linux/mmu_notifier.h>
 #include <linux/mm_inline.h>
 #include <linux/migrate.h>
+#include <linux/pagevec.h>
+#include <linux/shmem_fs.h>
 
 static struct kmem_cache *vrange_cachep;
 
@@ -875,21 +877,62 @@ out:
 	return ret;
 }
 
+static int __discard_vrange_file(struct address_space *mapping,
+			struct vrange *vrange, unsigned int *ret_discard)
+{
+	struct pagevec pvec;
+	pgoff_t index;
+	int i;
+	unsigned int nr_discard = 0;
+	unsigned long start_idx = vrange->node.start;
+	unsigned long end_idx = vrange->node.last;
+	const pgoff_t start = start_idx >> PAGE_CACHE_SHIFT;
+	pgoff_t end = end_idx >> PAGE_CACHE_SHIFT;
+	LIST_HEAD(pagelist);
+
+	pagevec_init(&pvec, 0);
+	index = start;
+	while (index <= end && pagevec_lookup(&pvec, mapping, index,
+			min(end - index, (pgoff_t)PAGEVEC_SIZE - 1) + 1)) {
+		for (i = 0; i < pagevec_count(&pvec); i++) {
+			struct page *page = pvec.pages[i];
+			index = page->index;
+			if (index > end)
+				break;
+			if (isolate_lru_page(page))
+				continue;
+			list_add(&page->lru, &pagelist);
+			inc_zone_page_state(page, NR_ISOLATED_ANON);
+		}
+		pagevec_release(&pvec);
+		cond_resched();
+		index++;
+	}
+
+	if (!list_empty(&pagelist))
+		nr_discard = discard_vrange_pagelist(&pagelist);
+
+	*ret_discard = nr_discard;
+	putback_lru_pages(&pagelist);
+
+	return 0;
+}
+
 static int discard_vrange(struct vrange *vrange)
 {
 	int ret = 0;
-	struct mm_struct *mm;
 	struct vrange_root *vroot;
 	unsigned int nr_discard = 0;
 	vroot = vrange->owner;
 
-	/* TODO : handle VRANGE_FILE */
-	if (vroot->type != VRANGE_MM)
-		goto out;
+	if (vroot->type == VRANGE_MM) {
+		struct mm_struct *mm = vroot->object;
+		ret = __discard_vrange_anon(mm, vrange, &nr_discard);
+	} else if (vroot->type == VRANGE_FILE) {
+		struct address_space *mapping = vroot->object;
+		ret = __discard_vrange_file(mapping, vrange, &nr_discard);
+	}
 
-	mm = vroot->object;
-	ret = __discard_vrange_anon(mm, vrange, &nr_discard);
-out:
 	return nr_discard;
 }
 
