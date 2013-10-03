@@ -6,6 +6,12 @@
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/mman.h>
+#include <linux/pagemap.h>
+#include <linux/rmap.h>
+#include <linux/hugetlb.h>
+#include "internal.h"
+#include <linux/swap.h>
+#include <linux/mmu_notifier.h>
 
 static struct kmem_cache *vrange_cachep;
 
@@ -62,6 +68,19 @@ static inline void __vrange_resize(struct vrange *range,
 	__vrange_remove(range);
 	__vrange_set(range, start_idx, end_idx, purged);
 	__vrange_add(range, vroot);
+}
+
+static struct vrange *__vrange_find(struct vrange_root *vroot,
+					unsigned long start_idx,
+					unsigned long end_idx)
+{
+	struct vrange *range = NULL;
+	struct interval_tree_node *node;
+
+	node = interval_tree_iter_first(&vroot->v_rb, start_idx, end_idx);
+	if (node)
+		range = vrange_from_node(node);
+	return range;
 }
 
 static int vrange_add(struct vrange_root *vroot,
@@ -393,4 +412,177 @@ SYSCALL_DEFINE4(vrange, unsigned long, start,
 
 out:
 	return ret;
+}
+
+bool vrange_addr_volatile(struct vm_area_struct *vma, unsigned long addr)
+{
+	struct vrange_root *vroot;
+	unsigned long vstart_idx, vend_idx;
+	bool ret = false;
+
+	vroot = __vma_to_vroot(vma);
+	vstart_idx = __vma_addr_to_index(vma, addr);
+	vend_idx = vstart_idx + PAGE_SIZE - 1;
+
+	vrange_lock(vroot);
+	if (__vrange_find(vroot, vstart_idx, vend_idx))
+		ret = true;
+	vrange_unlock(vroot);
+	return ret;
+}
+
+/* Caller should hold vrange_lock */
+static void do_purge(struct vrange_root *vroot,
+		unsigned long start_idx, unsigned long end_idx)
+{
+	struct vrange *range;
+	struct interval_tree_node *node;
+
+	node = interval_tree_iter_first(&vroot->v_rb, start_idx, end_idx);
+	while (node) {
+		range = container_of(node, struct vrange, node);
+		range->purged = true;
+		node = interval_tree_iter_next(node, start_idx, end_idx);
+	}
+}
+
+static void try_to_discard_one(struct vrange_root *vroot, struct page *page,
+				struct vm_area_struct *vma, unsigned long addr)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pte_t *pte;
+	pte_t pteval;
+	spinlock_t *ptl;
+
+	VM_BUG_ON(!PageLocked(page));
+
+	pte = page_check_address(page, mm, addr, &ptl, 0);
+	if (!pte)
+		return;
+
+	BUG_ON(vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|VM_HUGETLB));
+
+	flush_cache_page(vma, addr, page_to_pfn(page));
+	pteval = ptep_clear_flush(vma, addr, pte);
+
+	update_hiwater_rss(mm);
+	if (PageAnon(page))
+		dec_mm_counter(mm, MM_ANONPAGES);
+	else
+		dec_mm_counter(mm, MM_FILEPAGES);
+
+	page_remove_rmap(page);
+	page_cache_release(page);
+
+	pte_unmap_unlock(pte, ptl);
+	mmu_notifier_invalidate_page(mm, addr);
+
+	addr = __vma_addr_to_index(vma, addr);
+
+	do_purge(vroot, addr, addr + PAGE_SIZE - 1);
+}
+
+static int try_to_discard_anon_vpage(struct page *page)
+{
+	struct anon_vma *anon_vma;
+	struct anon_vma_chain *avc;
+	pgoff_t pgoff;
+	struct vm_area_struct *vma;
+	struct mm_struct *mm;
+	struct vrange_root *vroot;
+
+	unsigned long address;
+
+	anon_vma = page_lock_anon_vma_read(page);
+	if (!anon_vma)
+		return -1;
+
+	pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	/*
+	 * During interating the loop, some processes could see a page as
+	 * purged while others could see a page as not-purged because we have
+	 * no global lock between parent and child for protecting vrange system
+	 * call during this loop. But it's not a problem because the page is
+	 * not *SHARED* page but *COW* page so parent and child can see other
+	 * data anytime. The worst case by this race is a page was purged
+	 * but couldn't be discarded so it makes unnecessary page fault but
+	 * it wouldn't be severe.
+	 */
+	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
+		vma = avc->vma;
+		mm = vma->vm_mm;
+		vroot = &mm->vroot;
+		address = vma_address(page, vma);
+
+		vrange_lock(vroot);
+		if (!__vrange_find(vroot, address, address + PAGE_SIZE - 1)) {
+			vrange_unlock(vroot);
+			continue;
+		}
+
+		try_to_discard_one(vroot, page, vma, address);
+		vrange_unlock(vroot);
+	}
+
+	page_unlock_anon_vma_read(anon_vma);
+	return 0;
+}
+
+static int try_to_discard_file_vpage(struct page *page)
+{
+	struct address_space *mapping = page->mapping;
+	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	struct vm_area_struct *vma;
+	struct vrange_root *vroot;
+	unsigned long vstart_idx;
+	int ret = 1;
+
+	if (!page->mapping)
+		return ret;
+
+	vroot = &mapping->vroot;
+	vstart_idx = page->index << PAGE_SHIFT;
+
+	mutex_lock(&mapping->i_mmap_mutex);
+	vrange_lock(vroot);
+
+	if (!__vrange_find(vroot, vstart_idx, vstart_idx + PAGE_SIZE - 1))
+		goto out;
+
+	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff, pgoff) {
+		unsigned long address = vma_address(page, vma);
+		try_to_discard_one(vroot, page, vma, address);
+	}
+
+	VM_BUG_ON(page_mapped(page));
+	ret = 0;
+out:
+	vrange_unlock(vroot);
+	mutex_unlock(&mapping->i_mmap_mutex);
+	return ret;
+}
+
+static int try_to_discard_vpage(struct page *page)
+{
+	if (PageAnon(page))
+		return try_to_discard_anon_vpage(page);
+	return try_to_discard_file_vpage(page);
+}
+
+int discard_vpage(struct page *page)
+{
+	VM_BUG_ON(!PageLocked(page));
+	VM_BUG_ON(PageLRU(page));
+
+	if (!try_to_discard_vpage(page)) {
+		if (PageSwapCache(page))
+			try_to_free_swap(page);
+
+		if (page_freeze_refs(page, 1)) {
+			unlock_page(page);
+			return 0;
+		}
+	}
+
+	return 1;
 }
