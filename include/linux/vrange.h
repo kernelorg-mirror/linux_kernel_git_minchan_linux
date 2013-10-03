@@ -36,6 +36,8 @@ static inline int vrange_type(struct vrange *vrange)
 	return vrange->owner->type;
 }
 
+extern int vrange_clear(struct vrange_root *vroot,
+				unsigned long start, unsigned long end);
 extern void vrange_root_cleanup(struct vrange_root *vroot);
 extern int vrange_fork(struct mm_struct *new,
 					struct mm_struct *old);

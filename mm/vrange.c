@@ -167,6 +167,14 @@ static int vrange_remove(struct vrange_root *vroot,
 	return 0;
 }
 
+int vrange_clear(struct vrange_root *vroot,
+					unsigned long start, unsigned long end)
+{
+	int purged;
+
+	return vrange_remove(vroot, start, end - 1, &purged);
+}
+
 void vrange_root_cleanup(struct vrange_root *vroot)
 {
 	struct vrange *range;
