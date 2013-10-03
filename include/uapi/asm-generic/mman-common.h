@@ -66,4 +66,7 @@
 #define MAP_HUGE_SHIFT	26
 #define MAP_HUGE_MASK	0x3f
 
+#define VRANGE_VOLATILE		0	/* unpin pages so VM can discard them */
+#define VRANGE_NONVOLATILE	1	/* pin pages so VM can't discard them */
+
 #endif /* __ASM_GENERIC_MMAN_COMMON_H */
