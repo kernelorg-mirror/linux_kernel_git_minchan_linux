@@ -59,6 +59,7 @@
 #include <linux/gfp.h>
 #include <linux/migrate.h>
 #include <linux/string.h>
+#include <linux/vrange.h>
 
 #include <asm/io.h>
 #include <asm/pgalloc.h>
@@ -831,6 +832,8 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	if (unlikely(!pte_present(pte))) {
 		if (!pte_file(pte)) {
 			swp_entry_t entry = pte_to_swp_entry(pte);
+			if (is_vrange_entry(entry))
+				goto out_set_pte;
 
 			if (swap_duplicate(entry) < 0)
 				return entry.val;
@@ -1174,6 +1177,8 @@ again:
 				print_bad_pte(vma, addr, ptent, NULL);
 		} else {
 			swp_entry_t entry = pte_to_swp_entry(ptent);
+			if (is_vrange_entry(entry))
+				goto out;
 
 			if (!non_swap_entry(entry))
 				rss[MM_SWAPENTS]--;
@@ -1190,6 +1195,7 @@ again:
 			if (unlikely(!free_swap_and_cache(entry)))
 				print_bad_pte(vma, addr, ptent, NULL);
 		}
+out:
 		pte_clear_not_present_full(mm, addr, pte, tlb->fullmm);
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 
@@ -3715,15 +3721,36 @@ int handle_pte_fault(struct mm_struct *mm,
 
 	entry = *pte;
 	if (!pte_present(entry)) {
+		swp_entry_t vrange_entry;
+
 		if (pte_none(entry)) {
 			if (vma->vm_ops) {
 				if (likely(vma->vm_ops->fault))
 					return do_linear_fault(mm, vma, address,
 						pte, pmd, flags, entry);
 			}
+anon:
 			return do_anonymous_page(mm, vma, address,
 						 pte, pmd, flags);
 		}
+
+		vrange_entry = pte_to_swp_entry(entry);
+		if (unlikely(is_vrange_entry(vrange_entry))) {
+			if (!vrange_addr_purged(vma, address)) {
+				/* zap pte */
+				ptl = pte_lockptr(mm, pmd);
+				spin_lock(ptl);
+				if (unlikely(!pte_same(*pte, entry)))
+					goto unlock;
+				flush_cache_page(vma, address, pte_pfn(*pte));
+				ptep_clear_flush(vma, address, pte);
+				pte_unmap_unlock(pte, ptl);
+				goto anon;
+			}
+
+			return VM_FAULT_SIGBUS;
+		}
+
 		if (pte_file(entry))
 			return do_nonlinear_fault(mm, vma, address,
 					pte, pmd, flags, entry);

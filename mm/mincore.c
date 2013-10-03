@@ -15,6 +15,7 @@
 #include <linux/swap.h>
 #include <linux/swapops.h>
 #include <linux/hugetlb.h>
+#include <linux/vrange.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -129,7 +130,9 @@ static void mincore_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 		} else { /* pte is a swap entry */
 			swp_entry_t entry = pte_to_swp_entry(pte);
 
-			if (is_migration_entry(entry)) {
+			if (is_vrange_entry(entry))
+				*vec = 0;
+			else if (is_migration_entry(entry)) {
 				/* migration entries are always uptodate */
 				*vec = 1;
 			} else {
