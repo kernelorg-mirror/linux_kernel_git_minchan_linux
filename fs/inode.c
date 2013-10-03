@@ -18,6 +18,7 @@
 #include <linux/buffer_head.h> /* for inode_has_buffers */
 #include <linux/ratelimit.h>
 #include <linux/list_lru.h>
+#include <linux/vrange.h>
 #include "internal.h"
 
 /*
@@ -353,6 +354,7 @@ void address_space_init_once(struct address_space *mapping)
 	spin_lock_init(&mapping->private_lock);
 	mapping->i_mmap = RB_ROOT;
 	INIT_LIST_HEAD(&mapping->i_mmap_nonlinear);
+	vrange_root_init(&mapping->vroot, VRANGE_FILE, mapping);
 }
 EXPORT_SYMBOL(address_space_init_once);
 
@@ -1387,6 +1389,8 @@ static void iput_final(struct inode *inode)
 	if (!list_empty(&inode->i_lru))
 		inode_lru_list_del(inode);
 	spin_unlock(&inode->i_lock);
+
+	vrange_root_cleanup(&inode->i_mapping->vroot);
 
 	evict(inode);
 }
