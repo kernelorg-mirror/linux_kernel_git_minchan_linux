@@ -35,17 +35,6 @@ static inline unsigned int vrange_size(struct vrange *range)
 	return range->node.last + 1 - range->node.start;
 }
 
-static unsigned long shrink_vrange_count(struct shrinker *shrink,
-					struct shrink_control *sc);
-static unsigned long shrink_vrange_object(struct shrinker *s,
-					struct shrink_control *sc);
-
-static struct shrinker vrange_shrinker = {
-	.count_objects = shrink_vrange_count,
-	.scan_objects = shrink_vrange_object,
-	.seeks = DEFAULT_SEEKS
-};
-
 static void vroot_ctor(void *data)
 {
 	struct vrange_root *vroot = data;
@@ -63,7 +52,6 @@ static int __init vrange_init(void)
 				sizeof(struct vrange_root), 0,
 				SLAB_DESTROY_BY_RCU|SLAB_PANIC, vroot_ctor);
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
-	register_shrinker(&vrange_shrinker);
 	return 0;
 }
 module_init(vrange_init);
@@ -1034,12 +1022,6 @@ static int vrange_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	return 0;
 }
 
-static unsigned long shrink_vrange_count(struct shrinker *shrink,
-					struct shrink_control *sc)
-{
-	return vrange_list.size;
-}
-
 static unsigned int discard_vma_pages(struct mm_struct *mm,
 		struct vm_area_struct *vma, unsigned long start,
 		unsigned long end)
@@ -1186,45 +1168,71 @@ out:
 	return nr_discard;
 }
 
-static unsigned long shrink_vrange_object(struct shrinker *s,
-					struct shrink_control *sc)
+#define VRANGE_SCAN_THRESHOLD	(4 << 20)
+
+unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
+						struct scan_control *sc)
 {
-	unsigned long freed = 0;
-	struct vrange *range = NULL;
-	unsigned long nr_to_scan = sc->nr_to_scan;
-	unsigned long long list_size = vrange_list.size;
+	struct vrange *range;
+	unsigned long nr_to_reclaim, nr_reclaimed, total_reclaimed = 0;
+	unsigned long long list_size;
+	unsigned long long scan_threshold = VRANGE_SCAN_THRESHOLD;
 
 	if (!(sc->gfp_mask & __GFP_IO))
-		return SHRINK_STOP;
+		return 0;
 
-	if (!list_size)
-		return SHRINK_STOP;
+	/*
+	 * In current implementation, VM discard volatile pages by
+	 * following preference.
+	 *
+	 * stream pages -> volatile pages -> anon pages
+	 *
+	 * If we have trouble(ie, DEF_PRIORITY - 2) with reclaiming cache
+	 * pages, it means remained cache pages is likely being working set
+	 * so it would be better to discard volatile pages rather than
+	 * evicting working set.
+	 */
+	if (lru != LRU_INACTIVE_ANON && lru != LRU_ACTIVE_ANON &&
+	    sc->priority >= DEF_PRIORITY - 2)
+		return 0;
 
-	while (list_size > 0 && nr_to_scan > 0) {
-		unsigned long free;
-		range = vrange_isolate();
-		if (!range)
+	nr_to_reclaim = sc->nr_to_reclaim;
+
+	while (nr_to_reclaim > 0 && scan_threshold > 0) {
+		nr_reclaimed = 0;
+		list_size = vrange_list.size;
+
+		/* If list size is too small, stop scanning */
+		if (list_size < SWAP_CLUSTER_MAX)
 			break;
 
-		/* range is removing so don't bother */
+		range = vrange_isolate();
+		/* If there is no more vrange, stop */
+		if (!range)
+			return total_reclaimed;
+
+		/* range is removing */
 		if (!range->owner) {
 			__vrange_put(range);
-			free = vrange_size(range);
-			freed += free;
-			list_size -= free;
-			nr_to_scan -= free;
 			continue;
 		}
 
-		if (discard_vrange(range) < 0)
+		nr_reclaimed = discard_vrange(range);
+		scan_threshold -= vrange_size(range);
+
+		/* If it's EBUSY, retry it after a little */
+		if (nr_reclaimed < 0) {
 			__vrange_lru_add(range);
+			__vrange_put(range);
+			continue;
+		}
+
 		__vrange_put(range);
 
-		free = vrange_size(range);
-		freed += free;
-		list_size -= free;
-		nr_to_scan -= free;
+		total_reclaimed += nr_reclaimed;
+		if (total_reclaimed >= nr_to_reclaim)
+			break;
 	}
 
-	return freed;
+	return total_reclaimed;
 }
