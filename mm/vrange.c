@@ -35,6 +35,11 @@ struct vrange_walker {
 
 #define VRANGE_PURGED_MARK	0
 
+/*
+ * [mark|clear]_purge could invalidate cached address but it's rare
+ * and at the worst case, some address range would be rescan or skip
+ * so it isn't critical for integrity point of view.
+ */
 void mark_purge(struct vrange *range)
 {
 	range->hint |= (1 << VRANGE_PURGED_MARK);
@@ -49,6 +54,38 @@ bool vrange_purged(struct vrange *range)
 {
 	bool purged = range->hint & (1 << VRANGE_PURGED_MARK);
 	return purged;
+}
+
+void record_scan_addr(struct vrange *range, unsigned long addr)
+{
+	unsigned long old, new, ret;
+
+	BUG_ON(addr & ~PAGE_MASK);
+
+	/*
+	 * hint variable is shared by cache address and purged flag.
+	 * purged flag is modified while we hold vrange_lock but
+	 * cache address is modified without any lock so that it
+	 * could invalidate purged flag by racing do_purge, which
+	 * is critical. The cmpxchg should prevent it.
+	 */
+	do {
+		old = range->hint;
+		new = old | addr;
+		ret = cmpxchg(&range->hint, old, new);
+	} while (ret != old);
+
+	BUG_ON(addr && addr > range->node.last + 1);
+	BUG_ON(addr && addr < range->node.start);
+}
+
+unsigned long load_scan_addr(struct vrange *range)
+{
+	unsigned long cached_addr = range->hint & PAGE_MASK;
+	BUG_ON(cached_addr && cached_addr > range->node.last + 1);
+	BUG_ON(cached_addr && cached_addr < range->node.start);
+
+	return cached_addr;
 }
 
 static inline unsigned int vrange_size(struct vrange *range)
@@ -314,6 +351,9 @@ static inline void __vrange_set(struct vrange *range,
 {
 	range->node.start = start_idx;
 	range->node.last = end_idx;
+
+	/* If resize happens, invalidate cache addr */
+	range->hint = 0;
 	if (purged)
 		mark_purge(range);
 	else
@@ -1076,12 +1116,13 @@ static unsigned int discard_vma_pages(struct mm_struct *mm,
  * so avoid touching vrange->owner.
  */
 static int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
-					unsigned int *ret_discard)
+				unsigned int *ret_discard, unsigned long *scan)
 {
 	struct vm_area_struct *vma;
 	unsigned int nr_discard = 0;
 	unsigned long start = vrange->node.start;
 	unsigned long end = vrange->node.last + 1;
+	unsigned long cached_addr;
 	int ret = 0;
 
 	/* It prevent to destroy vma when the process exist */
@@ -1094,6 +1135,10 @@ static int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
 		goto out; /* this vrange could be retried */
 	}
 
+	cached_addr = load_scan_addr(vrange);
+	if (cached_addr)
+		start = cached_addr;
+
 	vma = find_vma(mm, start);
 	if (!vma || (vma->vm_start >= end))
 		goto out_unlock;
@@ -1104,10 +1149,18 @@ static int __discard_vrange_anon(struct mm_struct *mm, struct vrange *vrange,
 		BUG_ON(vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|
 					VM_HUGETLB));
 		cond_resched();
-		nr_discard += discard_vma_pages(mm, vma,
-				max_t(unsigned long, start, vma->vm_start),
-				min_t(unsigned long, end, vma->vm_end));
+
+		start = max(start, vma->vm_start);
+		end = min(end, vma->vm_end);
+		end = min(start + *scan, end);
+
+		nr_discard += discard_vma_pages(mm, vma, start, end);
+		*scan -= (end - start);
+		if (!*scan)
+			break;
 	}
+
+	record_scan_addr(vrange, end);
 out_unlock:
 	up_read(&mm->mmap_sem);
 	mmput(mm);
@@ -1117,17 +1170,26 @@ out:
 }
 
 static int __discard_vrange_file(struct address_space *mapping,
-			struct vrange *vrange, unsigned int *ret_discard)
+				struct vrange *vrange,
+				unsigned int *ret_discard, unsigned long *scan)
 {
 	struct pagevec pvec;
 	pgoff_t index;
 	int i;
+	unsigned long cached_addr;
 	unsigned int nr_discard = 0;
 	unsigned long start_idx = vrange->node.start;
 	unsigned long end_idx = vrange->node.last;
 	const pgoff_t start = start_idx >> PAGE_CACHE_SHIFT;
-	pgoff_t end = end_idx >> PAGE_CACHE_SHIFT;
+	pgoff_t end;
 	LIST_HEAD(pagelist);
+
+	cached_addr = load_scan_addr(vrange);
+	if (cached_addr)
+		start_idx = cached_addr;
+
+	end_idx = min(start_idx + *scan, end_idx);
+	end = end_idx >> PAGE_CACHE_SHIFT;
 
 	pagevec_init(&pvec, 0);
 	index = start;
@@ -1151,13 +1213,14 @@ static int __discard_vrange_file(struct address_space *mapping,
 	if (!list_empty(&pagelist))
 		nr_discard = discard_vrange_pagelist(&pagelist);
 
+	record_scan_addr(vrange, end_idx + 1);
 	*ret_discard = nr_discard;
 	putback_lru_pages(&pagelist);
 
 	return 0;
 }
 
-static int discard_vrange(struct vrange *vrange)
+static int discard_vrange(struct vrange *vrange, unsigned long *scan)
 {
 	int ret = 0;
 	struct vrange_root *vroot;
@@ -1175,10 +1238,12 @@ static int discard_vrange(struct vrange *vrange)
 
 	if (vroot->type == VRANGE_MM) {
 		struct mm_struct *mm = vroot->object;
-		ret = __discard_vrange_anon(mm, vrange, &nr_discard);
+		ret = __discard_vrange_anon(mm, vrange,
+						&nr_discard, scan);
 	} else if (vroot->type == VRANGE_FILE) {
 		struct address_space *mapping = vroot->object;
-		ret = __discard_vrange_file(mapping, vrange, &nr_discard);
+		ret = __discard_vrange_file(mapping, vrange,
+						&nr_discard, scan);
 	}
 
 	if (!ret) {
@@ -1201,7 +1266,7 @@ unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
 	struct vrange *range;
 	unsigned long nr_to_reclaim, nr_reclaimed, total_reclaimed = 1;
 	unsigned long long list_size;
-	unsigned long long scan_threshold = VRANGE_SCAN_THRESHOLD;
+	unsigned long remained_scan = VRANGE_SCAN_THRESHOLD;
 
 	if (!(sc->gfp_mask & __GFP_IO))
 		return 0;
@@ -1223,7 +1288,7 @@ unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
 
 	nr_to_reclaim = sc->nr_to_reclaim;
 
-	while (nr_to_reclaim > 0 && scan_threshold > 0) {
+	while (nr_to_reclaim > 0 && remained_scan > 0) {
 		nr_reclaimed = 0;
 		list_size = vrange_list.size;
 
@@ -1242,9 +1307,7 @@ unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
 			continue;
 		}
 
-		nr_reclaimed = discard_vrange(range);
-		scan_threshold -= vrange_size(range);
-
+		nr_reclaimed = discard_vrange(range, &remained_scan);
 		/* If it's EBUSY, retry it after a little */
 		if (nr_reclaimed < 0) {
 			__vrange_lru_add(range);
