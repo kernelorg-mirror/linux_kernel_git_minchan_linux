@@ -663,7 +663,7 @@ int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma)
  */
 int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			unsigned long address, unsigned int *mapcount,
-			unsigned long *vm_flags, int *is_vrange)
+			unsigned long *vm_flags)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	int referenced = 0;
@@ -686,7 +686,7 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		if (vma->vm_flags & VM_LOCKED) {
 			spin_unlock(&mm->page_table_lock);
 			*mapcount = 0;	/* break early from loop */
-			*vm_flags |= VM_LOCKED;
+			*vm_flags &= VM_LOCKED;
 			goto out;
 		}
 
@@ -709,7 +709,7 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		if (vma->vm_flags & VM_LOCKED) {
 			pte_unmap_unlock(pte, ptl);
 			*mapcount = 0;	/* break early from loop */
-			*vm_flags |= VM_LOCKED;
+			*vm_flags &= VM_LOCKED;
 			goto out;
 		}
 
@@ -725,9 +725,9 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 				referenced++;
 		}
 		pte_unmap_unlock(pte, ptl);
-		if (is_vrange && vrange_addr_volatile(vma, address)) {
-			*is_vrange = 1;
+		if (*vm_flags & VM_VRANGE && vrange_addr_volatile(vma, address)) {
 			*mapcount = 0; /* break ealry from loop */
+			*vm_flags &= VM_VRANGE;
 			goto out;
 		}
 	}
@@ -735,14 +735,14 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 	(*mapcount)--;
 
 	if (referenced)
-		*vm_flags |= vma->vm_flags;
+		*vm_flags &= vma->vm_flags;
 out:
 	return referenced;
 }
 
 static int page_referenced_anon(struct page *page,
 				struct mem_cgroup *memcg,
-				unsigned long *vm_flags, int *is_vrange)
+				unsigned long *vm_flags)
 {
 	unsigned int mapcount;
 	struct anon_vma *anon_vma;
@@ -767,8 +767,7 @@ static int page_referenced_anon(struct page *page,
 		if (memcg && !mm_match_cgroup(vma->vm_mm, memcg))
 			continue;
 		referenced += page_referenced_one(page, vma, address,
-						  &mapcount, vm_flags,
-						  is_vrange);
+						  &mapcount, vm_flags);
 		if (!mapcount)
 			break;
 	}
@@ -792,7 +791,7 @@ static int page_referenced_anon(struct page *page,
  */
 static int page_referenced_file(struct page *page,
 				struct mem_cgroup *memcg,
-				unsigned long *vm_flags, int *is_vrange)
+				unsigned long *vm_flags)
 {
 	unsigned int mapcount;
 	struct address_space *mapping = page->mapping;
@@ -833,8 +832,7 @@ static int page_referenced_file(struct page *page,
 		if (memcg && !mm_match_cgroup(vma->vm_mm, memcg))
 			continue;
 		referenced += page_referenced_one(page, vma, address,
-						  &mapcount, vm_flags,
-						  is_vrange);
+						  &mapcount, vm_flags);
 		if (!mapcount)
 			break;
 	}
@@ -849,21 +847,21 @@ static int page_referenced_file(struct page *page,
  * @is_locked: caller holds lock on the page
  * @memcg: target memory cgroup
  * @vm_flags: collect encountered vma->vm_flags who actually referenced the page
- * @is_vrange: Is @page in vrange?
  *
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
+ *
+ * NOTE: caller should pass interested flags in vm_flags to collect
+ * vma->vm_flags.
  */
 int page_referenced(struct page *page,
 		    int is_locked,
 		    struct mem_cgroup *memcg,
-		    unsigned long *vm_flags,
-		    int *is_vrange)
+		    unsigned long *vm_flags)
 {
 	int referenced = 0;
 	int we_locked = 0;
 
-	*vm_flags = 0;
 	if (page_mapped(page) && page_rmapping(page)) {
 		if (!is_locked && (!PageAnon(page) || PageKsm(page))) {
 			we_locked = trylock_page(page);
@@ -877,12 +875,10 @@ int page_referenced(struct page *page,
 								vm_flags);
 		else if (PageAnon(page))
 			referenced += page_referenced_anon(page, memcg,
-								vm_flags,
-								is_vrange);
+								vm_flags);
 		else if (page->mapping)
 			referenced += page_referenced_file(page, memcg,
-								vm_flags,
-								is_vrange);
+								vm_flags);
 		if (we_locked)
 			unlock_page(page);
 	}

@@ -103,6 +103,15 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_IO           0x00004000	/* Memory mapped I/O or similar */
 
 					/* Used by sys_madvise() */
+/*
+ * VM_VRANGE is rather special. Actually, vma->vm_flags doesn't have such flag.
+ * It is used to identify whether a page put on volatile range or not
+ * by page_referenced. So, if we are lack of new bit in vmflags, we could
+ * replace it with assembling exclusive flags.
+ *
+ * ex) VM_HUGEPAGE|VM_NOHUGEPAGE
+ */
+#define VM_VRANGE	0x00001000
 #define VM_SEQ_READ	0x00008000	/* App will access data sequentially */
 #define VM_RAND_READ	0x00010000	/* App will not benefit from clustered reads */
 
