@@ -17,6 +17,7 @@
 #include <linux/shmem_fs.h>
 
 static struct kmem_cache *vrange_cachep;
+static struct kmem_cache *vroot_cachep;
 
 static struct vrange_list {
 	struct list_head list;
@@ -33,15 +34,181 @@ static inline unsigned long vrange_size(struct vrange *range)
 	return range->node.last + 1 - range->node.start;
 }
 
+static void vroot_ctor(void *data)
+{
+	struct vrange_root *vroot = data;
+
+	atomic_set(&vroot->refcount, 0);
+	mutex_init(&vroot->v_lock);
+	vroot->v_rb = RB_ROOT;
+}
+
 static int __init vrange_init(void)
 {
 	INIT_LIST_HEAD(&vrange_list.list);
 	spin_lock_init(&vrange_list.lock);
 
+	vroot_cachep = kmem_cache_create("vrange_root",
+				sizeof(struct vrange_root), 0,
+				SLAB_DESTROY_BY_RCU|SLAB_PANIC, vroot_ctor);
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
 	return 0;
 }
 module_init(vrange_init);
+
+static struct vrange_root *__vroot_alloc(gfp_t flags)
+{
+	struct vrange_root *vroot = kmem_cache_alloc(vroot_cachep, flags);
+	if (!vroot)
+		return vroot;
+
+	atomic_set(&vroot->refcount, 1);
+	return vroot;
+}
+
+static inline int __vroot_get(struct vrange_root *vroot)
+{
+	if (!atomic_inc_not_zero(&vroot->refcount))
+		return 0;
+
+	return 1;
+}
+
+static inline void __vroot_put(struct vrange_root *vroot)
+{
+	if (atomic_dec_and_test(&vroot->refcount)) {
+		enum {VRANGE_MM, VRANGE_FILE} type = vroot->type;
+		if (type == VRANGE_MM) {
+			struct mm_struct *mm = vroot->object;
+			mmdrop(mm);
+		} else if (type == VRANGE_FILE) {
+			/* TODO : */
+		} else
+			BUG();
+
+		WARN_ON(!RB_EMPTY_ROOT(&vroot->v_rb));
+		kmem_cache_free(vroot_cachep, vroot);
+	}
+}
+
+static bool __vroot_init_mm(struct vrange_root *vroot, struct mm_struct *mm)
+{
+	bool ret = false;
+
+	spin_lock(&mm->page_table_lock);
+	if (!mm->vroot) {
+		mm->vroot = vroot;
+		vrange_root_init(mm->vroot, VRANGE_MM, mm);
+		atomic_inc(&mm->mm_count);
+		ret = true;
+	}
+	spin_unlock(&mm->page_table_lock);
+
+	return ret;
+}
+
+static bool __vroot_init_mapping(struct vrange_root *vroot,
+						struct address_space *mapping)
+{
+	bool ret = false;
+
+	mutex_lock(&mapping->i_mmap_mutex);
+	if (!mapping->vroot) {
+		mapping->vroot = vroot;
+		vrange_root_init(mapping->vroot, VRANGE_FILE, mapping);
+		/* XXX - inc ref count on mapping? */
+		ret = true;
+	}
+	mutex_unlock(&mapping->i_mmap_mutex);
+
+	return ret;
+}
+
+static struct vrange_root *vroot_alloc_mm(struct mm_struct *mm)
+{
+	struct vrange_root *ret, *allocated;
+
+	ret = NULL;
+	allocated = __vroot_alloc(GFP_NOFS);
+	if (!allocated)
+		return NULL;
+
+	if (__vroot_init_mm(allocated, mm)) {
+		ret = allocated;
+		allocated = NULL;
+	}
+
+	if (allocated)
+		__vroot_put(allocated);
+
+	return ret;
+}
+
+static struct vrange_root *vroot_alloc_vma(struct vm_area_struct *vma)
+{
+	struct vrange_root *ret, *allocated;
+	bool val;
+
+	ret = NULL;
+	allocated = __vroot_alloc(GFP_KERNEL);
+	if (!allocated)
+		return NULL;
+
+	if (vma->vm_file && (vma->vm_flags & VM_SHARED))
+		val = __vroot_init_mapping(allocated, vma->vm_file->f_mapping);
+	else
+		val = __vroot_init_mm(allocated, vma->vm_mm);
+
+	if (val) {
+		ret = allocated;
+		allocated = NULL;
+	}
+
+	if (allocated)
+		kmem_cache_free(vroot_cachep, allocated);
+
+	return ret;
+}
+
+static struct vrange_root *vrange_get_vroot(struct vrange *vrange)
+{
+	struct vrange_root *vroot;
+	struct vrange_root *ret = NULL;
+
+	rcu_read_lock();
+	/*
+	 * Prevent compiler from re-fetching vrange->owner while others
+	 * clears vrange->owner.
+	 */
+	vroot = ACCESS_ONCE(vrange->owner);
+	if (!vroot)
+		goto out;
+
+	/*
+	 * vroot couldn't be destroyed while we're holding rcu_read_lock
+	 * so it's okay to access vroot
+	 */
+	if (!__vroot_get(vroot))
+		goto out;
+
+
+	/* If we reach here, vroot is either ours or others because
+	 * vroot could be allocated for othres in same RCU period
+	 * so we should check it carefully. For free/reallocating
+	 * for others, all vranges from vroot->tree should be detached
+	 * firstly right before vroot freeing so if we check vrange->owner
+	 * isn't NULL, it means vroot is ours.
+	 */
+	smp_rmb();
+	if (!vrange->owner) {
+		__vroot_put(vroot);
+		goto out;
+	}
+	ret = vroot;
+out:
+	rcu_read_unlock();
+	return ret;
+}
 
 static struct vrange *__vrange_alloc(gfp_t flags)
 {
@@ -197,6 +364,9 @@ static int vrange_remove(struct vrange_root *vroot,
 	struct interval_tree_node *node, *next;
 	bool used_new = false;
 
+	if (!vroot)
+		return 0;
+
 	if (!purged)
 		return -EINVAL;
 
@@ -267,6 +437,9 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 	struct vrange *range;
 	struct rb_node *node;
 
+	if (vroot == NULL)
+		return;
+
 	vrange_lock(vroot);
 	/* We should remove node by post-order traversal */
 	while ((node = rb_first(&vroot->v_rb))) {
@@ -275,6 +448,12 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 		__vrange_put(range);
 	}
 	vrange_unlock(vroot);
+	/*
+	 * Before removing vroot, we should make sure range-owner
+	 * should be NULL. See the smp_rmb of vrange_get_vroot.
+	 */
+	smp_wmb();
+	__vroot_put(vroot);
 }
 
 /*
@@ -282,6 +461,7 @@ void vrange_root_cleanup(struct vrange_root *vroot)
  * can't have copied own vrange data structure so that pages in the
  * vrange couldn't be purged. It would be better rather than failing
  * fork.
+ * The down_write of both mm->mmap_sem protects mm->vroot race.
  */
 int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 {
@@ -289,8 +469,14 @@ int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 	struct vrange *range, *new_range;
 	struct rb_node *next;
 
-	new = &new_mm->vroot;
-	old = &old_mm->vroot;
+	if (!old_mm->vroot)
+		return 0;
+
+	new = vroot_alloc_mm(new_mm);
+	if (!new)
+		return -ENOMEM;
+
+	old = old_mm->vroot;
 
 	vrange_lock(old);
 	next = rb_first(&old->v_rb);
@@ -311,6 +497,7 @@ int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 
 	}
 	vrange_unlock(old);
+
 	return 0;
 fail:
 	vrange_unlock(old);
@@ -323,9 +510,27 @@ static inline struct vrange_root *__vma_to_vroot(struct vm_area_struct *vma)
 	struct vrange_root *vroot = NULL;
 
 	if (vma->vm_file && (vma->vm_flags & VM_SHARED))
-		vroot = &vma->vm_file->f_mapping->vroot;
+		vroot = vma->vm_file->f_mapping->vroot;
 	else
-		vroot = &vma->vm_mm->vroot;
+		vroot = vma->vm_mm->vroot;
+
+	return vroot;
+}
+
+static inline struct vrange_root *__vma_to_vroot_get(struct vm_area_struct *vma)
+{
+	struct vrange_root *vroot = NULL;
+
+	rcu_read_lock();
+	vroot = __vma_to_vroot(vma);
+
+	if (!vroot)
+		goto out;
+
+	if (!__vroot_get(vroot))
+		vroot = NULL;
+out:
+	rcu_read_unlock();
 	return vroot;
 }
 
@@ -371,6 +576,11 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start_idx,
 			tmp = end_idx;
 
 		vroot = __vma_to_vroot(vma);
+		if (!vroot)
+			vroot = vroot_alloc_vma(vma);
+		if (!vroot)
+			goto out;
+
 		vstart_idx = __vma_addr_to_index(vma, start_idx);
 		vend_idx = __vma_addr_to_index(vma, tmp);
 
@@ -483,17 +693,31 @@ out:
 bool vrange_addr_volatile(struct vm_area_struct *vma, unsigned long addr)
 {
 	struct vrange_root *vroot;
+	struct vrange *vrange;
 	unsigned long vstart_idx, vend_idx;
 	bool ret = false;
 
-	vroot = __vma_to_vroot(vma);
+	vroot = __vma_to_vroot_get(vma);
+
+	if (!vroot)
+		return ret;
+
 	vstart_idx = __vma_addr_to_index(vma, addr);
 	vend_idx = vstart_idx + PAGE_SIZE - 1;
 
 	vrange_lock(vroot);
-	if (__vrange_find(vroot, vstart_idx, vend_idx))
-		ret = true;
+	vrange = __vrange_find(vroot, vstart_idx, vend_idx);
+	if (vrange) {
+		/*
+		 * vroot can be allocated for another process in
+		 * same period so let's check vroot's stability
+		 */
+		if (likely(vroot == vrange->owner))
+			ret = true;
+	}
 	vrange_unlock(vroot);
+	__vroot_put(vroot);
+
 	return ret;
 }
 
@@ -505,12 +729,16 @@ bool vrange_addr_purged(struct vm_area_struct *vma, unsigned long addr)
 	bool ret = false;
 
 	vroot = __vma_to_vroot(vma);
+	if (!vroot)
+		return false;
+
 	vstart_idx = __vma_addr_to_index(vma, addr);
 
 	vrange_lock(vroot);
 	range = __vrange_find(vroot, vstart_idx, vstart_idx);
 	if (range && range->purged)
 		ret = true;
+
 	vrange_unlock(vroot);
 	return ret;
 }
@@ -538,6 +766,7 @@ static void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	pte_t pteval;
 	spinlock_t *ptl;
 
+	VM_BUG_ON(!vroot);
 	VM_BUG_ON(!PageLocked(page));
 
 	pte = page_check_address(page, mm, addr, &ptl, 0);
@@ -596,9 +825,11 @@ static int try_to_discard_anon_vpage(struct page *page)
 	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
 		vma = avc->vma;
 		mm = vma->vm_mm;
-		vroot = &mm->vroot;
-		address = vma_address(page, vma);
+		vroot = __vma_to_vroot(vma);
+		if (!vroot)
+			continue;
 
+		address = vma_address(page, vma);
 		vrange_lock(vroot);
 		if (!__vrange_find(vroot, address, address + PAGE_SIZE - 1)) {
 			vrange_unlock(vroot);
@@ -625,7 +856,10 @@ static int try_to_discard_file_vpage(struct page *page)
 	if (!page->mapping)
 		return ret;
 
-	vroot = &mapping->vroot;
+	vroot = mapping->vroot;
+	if (!vroot)
+		return ret;
+
 	vstart_idx = page->index << PAGE_SHIFT;
 
 	mutex_lock(&mapping->i_mmap_mutex);
@@ -901,6 +1135,17 @@ static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard)
 	struct vrange_root *vroot;
 	vroot = vrange->owner;
 
+	vroot = vrange_get_vroot(vrange);
+	if (!vroot)
+		return 0;
+
+	/*
+	 * Race of vrange->owner could happens with __vrange_remove
+	 * but it's okay because subfunctions will check it again
+	 */
+	if (vrange->owner == NULL)
+		goto out;
+
 	if (vroot->type == VRANGE_MM) {
 		struct mm_struct *mm = vroot->object;
 		ret = __discard_vrange_anon(mm, vrange, nr_discard);
@@ -909,6 +1154,8 @@ static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard)
 		ret = __discard_vrange_file(mapping, vrange, nr_discard);
 	}
 
+out:
+	__vroot_put(vroot);
 	return ret;
 }
 

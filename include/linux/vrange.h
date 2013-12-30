@@ -30,8 +30,6 @@ static inline void vrange_root_init(struct vrange_root *vroot, int type,
 								void *object)
 {
 	vroot->type = type;
-	vroot->v_rb = RB_ROOT;
-	mutex_init(&vroot->v_lock);
 	vroot->object = object;
 }
 
