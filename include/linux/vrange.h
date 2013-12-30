@@ -12,6 +12,8 @@
 #define vrange_entry(ptr) \
 	container_of(ptr, struct vrange, node.rb)
 
+struct scan_control;
+
 #ifdef CONFIG_MMU
 
 static inline swp_entry_t make_vrange_entry(void)
@@ -57,6 +59,8 @@ int discard_vpage(struct page *page);
 bool vrange_addr_volatile(struct vm_area_struct *vma, unsigned long addr);
 extern bool vrange_addr_purged(struct vm_area_struct *vma,
 				unsigned long address);
+extern unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
+					struct scan_control *sc);
 #else
 
 static inline void vrange_root_init(struct vrange_root *vroot,
@@ -75,5 +79,11 @@ static inline bool vrange_addr_volatile(struct vm_area_struct *vma,
 static inline int discard_vpage(struct page *page) { return 0 };
 static inline bool vrange_addr_purged(struct vm_area_struct *vma,
 				unsigned long address);
+static inline unsigned long shrink_vrange(enum lru_list lru,
+		struct lruvec *lruvec, 	struct scan_control *sc)
+{
+	return 0;
+}
+
 #endif
 #endif /* _LINIUX_VRANGE_H */

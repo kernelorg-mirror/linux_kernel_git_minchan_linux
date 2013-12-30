@@ -10,13 +10,25 @@
 #include <linux/rmap.h>
 #include <linux/hugetlb.h>
 #include "internal.h"
-#include <linux/swap.h>
 #include <linux/mmu_notifier.h>
 
 static struct kmem_cache *vrange_cachep;
 
+static struct vrange_list {
+	struct list_head list;
+	spinlock_t lock;
+} vrange_list;
+
+static inline unsigned long vrange_size(struct vrange *range)
+{
+	return range->node.last + 1 - range->node.start;
+}
+
 static int __init vrange_init(void)
 {
+	INIT_LIST_HEAD(&vrange_list.list);
+	spin_lock_init(&vrange_list.lock);
+
 	vrange_cachep = KMEM_CACHE(vrange, SLAB_PANIC);
 	return 0;
 }
@@ -27,21 +39,65 @@ static struct vrange *__vrange_alloc(gfp_t flags)
 	struct vrange *vrange = kmem_cache_alloc(vrange_cachep, flags);
 	if (!vrange)
 		return vrange;
+
 	vrange->owner = NULL;
 	vrange->purged = 0;
+	INIT_LIST_HEAD(&vrange->lru);
+	atomic_set(&vrange->refcount, 1);
+
 	return vrange;
 }
 
 static void __vrange_free(struct vrange *range)
 {
 	WARN_ON(range->owner);
+	WARN_ON(atomic_read(&range->refcount) != 0);
+	WARN_ON(!list_empty(&range->lru));
+
 	kmem_cache_free(vrange_cachep, range);
+}
+
+static inline void __vrange_lru_add(struct vrange *range)
+{
+	spin_lock(&vrange_list.lock);
+	WARN_ON(!list_empty(&range->lru));
+	list_add(&range->lru, &vrange_list.list);
+	spin_unlock(&vrange_list.lock);
+}
+
+static inline void __vrange_lru_del(struct vrange *range)
+{
+	spin_lock(&vrange_list.lock);
+	if (!list_empty(&range->lru)) {
+		list_del_init(&range->lru);
+		WARN_ON(range->owner);
+	}
+	spin_unlock(&vrange_list.lock);
 }
 
 static void __vrange_add(struct vrange *range, struct vrange_root *vroot)
 {
 	range->owner = vroot;
 	interval_tree_insert(&range->node, &vroot->v_rb);
+
+	WARN_ON(atomic_read(&range->refcount) <= 0);
+	__vrange_lru_add(range);
+}
+
+static inline int __vrange_get(struct vrange *vrange)
+{
+	if (!atomic_inc_not_zero(&vrange->refcount))
+		return 0;
+
+	return 1;
+}
+
+static inline void __vrange_put(struct vrange *range)
+{
+	if (atomic_dec_and_test(&range->refcount)) {
+		__vrange_lru_del(range);
+		__vrange_free(range);
+	}
 }
 
 static void __vrange_remove(struct vrange *range)
@@ -66,6 +122,7 @@ static inline void __vrange_resize(struct vrange *range,
 	bool purged = range->purged;
 
 	__vrange_remove(range);
+	__vrange_lru_del(range);
 	__vrange_set(range, start_idx, end_idx, purged);
 	__vrange_add(range, vroot);
 }
@@ -102,7 +159,7 @@ static int vrange_add(struct vrange_root *vroot,
 		range = vrange_from_node(node);
 		/* old range covers new range fully */
 		if (node->start <= start_idx && node->last >= end_idx) {
-			__vrange_free(new_range);
+			__vrange_put(new_range);
 			goto out;
 		}
 
@@ -111,7 +168,7 @@ static int vrange_add(struct vrange_root *vroot,
 		purged |= range->purged;
 
 		__vrange_remove(range);
-		__vrange_free(range);
+		__vrange_put(range);
 
 		node = next;
 	}
@@ -152,7 +209,7 @@ static int vrange_remove(struct vrange_root *vroot,
 		if (start_idx <= node->start && end_idx >= node->last) {
 			/* argumented range covers the range fully */
 			__vrange_remove(range);
-			__vrange_free(range);
+			__vrange_put(range);
 		} else if (node->start >= start_idx) {
 			/*
 			 * Argumented range covers over the left of the
@@ -183,7 +240,7 @@ static int vrange_remove(struct vrange_root *vroot,
 	vrange_unlock(vroot);
 
 	if (!used_new)
-		__vrange_free(new_range);
+		__vrange_put(new_range);
 
 	return 0;
 }
@@ -206,7 +263,7 @@ void vrange_root_cleanup(struct vrange_root *vroot)
 	while ((node = rb_first(&vroot->v_rb))) {
 		range = vrange_entry(node);
 		__vrange_remove(range);
-		__vrange_free(range);
+		__vrange_put(range);
 	}
 	vrange_unlock(vroot);
 }
@@ -604,4 +661,94 @@ int discard_vpage(struct page *page)
 	}
 
 	return 1;
+}
+
+static struct vrange *vrange_isolate(void)
+{
+	struct vrange *vrange = NULL;
+	spin_lock(&vrange_list.lock);
+	while (!list_empty(&vrange_list.list)) {
+		vrange = list_entry(vrange_list.list.prev,
+				struct vrange, lru);
+		list_del_init(&vrange->lru);
+		/* vrange is going to destroy */
+		if (__vrange_get(vrange))
+			break;
+
+		vrange = NULL;
+	}
+
+	spin_unlock(&vrange_list.lock);
+	return vrange;
+}
+
+static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard)
+{
+	return 0;
+}
+
+#define VRANGE_SCAN_THRESHOLD	(4 << 20)
+
+unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
+		struct scan_control *sc)
+{
+	int retry = 10;
+	struct vrange *range;
+	unsigned long nr_to_reclaim, total_reclaimed = 0;
+	unsigned long long scan_threshold = VRANGE_SCAN_THRESHOLD;
+
+	if (!(sc->gfp_mask & __GFP_IO))
+		return 0;
+	/*
+	 * In current implementation, VM discard volatile pages by
+	 * following preference.
+	 *
+	 * stream pages -> volatile pages -> anon pages
+	 *
+	 * If we have trouble(ie, DEF_PRIORITY - 2) with reclaiming cache
+	 * pages, it means remained cache pages is likely being working set
+	 * so it would be better to discard volatile pages rather than
+	 * evicting working set.
+	 */
+	if (lru != LRU_INACTIVE_ANON && lru != LRU_ACTIVE_ANON &&
+			sc->priority >= DEF_PRIORITY - 2)
+		return 0;
+
+	nr_to_reclaim = sc->nr_to_reclaim;
+
+	while (nr_to_reclaim > 0 && scan_threshold > 0 && retry) {
+		unsigned long nr_reclaimed = 0;
+		int ret;
+
+		range = vrange_isolate();
+		/* If there is no more vrange, stop */
+		if (!range)
+			return total_reclaimed;
+
+		/* range is removing */
+		if (!range->owner) {
+			__vrange_put(range);
+			continue;
+		}
+
+		ret = discard_vrange(range, &nr_reclaimed);
+		scan_threshold -= vrange_size(range);
+
+		/* If it's EAGAIN, retry it after a little */
+		if (ret == -EAGAIN) {
+			retry--;
+			__vrange_lru_add(range);
+			__vrange_put(range);
+			continue;
+		}
+
+		__vrange_put(range);
+		retry = 10;
+
+		total_reclaimed += nr_reclaimed;
+		if (total_reclaimed >= nr_to_reclaim)
+			break;
+	}
+
+	return total_reclaimed;
 }
