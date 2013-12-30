@@ -53,6 +53,7 @@ extern void shmem_unlock_mapping(struct address_space *mapping);
 extern struct page *shmem_read_mapping_page_gfp(struct address_space *mapping,
 					pgoff_t index, gfp_t gfp_mask);
 extern void shmem_truncate_range(struct inode *inode, loff_t start, loff_t end);
+extern void shmem_purge_page(struct inode *inode, struct page *page);
 extern int shmem_unuse(swp_entry_t entry, struct page *page);
 
 static inline struct page *shmem_read_mapping_page(

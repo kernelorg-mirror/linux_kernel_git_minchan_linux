@@ -441,6 +441,52 @@ void shmem_unlock_mapping(struct address_space *mapping)
 	}
 }
 
+void shmem_purge_page(struct inode *inode, struct page *page)
+{
+	struct page *ret_page;
+	struct address_space *mapping = inode->i_mapping;
+	struct shmem_inode_info *info = SHMEM_I(inode);
+	pgoff_t indices;
+	long nr_swaps_freed = 0;
+	pgoff_t index = page->index;
+
+	VM_BUG_ON(page_mapped(page));
+	VM_BUG_ON(!PageLocked(page));
+
+	if (!shmem_find_get_pages_and_swap(mapping, index,
+				1, &ret_page, &indices))
+		return;
+
+	index = indices;
+	mem_cgroup_uncharge_start();
+	if (radix_tree_exceptional_entry(ret_page)) {
+		int error;
+		spin_lock_irq(&mapping->tree_lock);
+		error = shmem_radix_tree_replace(mapping, index,
+						ret_page, NULL);
+		spin_unlock_irq(&mapping->tree_lock);
+		if (!error) {
+			swp_entry_t swap = radix_to_swp_entry(ret_page);
+			free_swap_and_cache_locked(swap);
+		}
+	} else {
+		if (page->mapping == mapping)
+			truncate_inode_page(mapping, ret_page);
+		put_page(ret_page);
+	}
+
+	mem_cgroup_uncharge_end();
+
+	spin_lock(&info->lock);
+	info->swapped -= nr_swaps_freed;
+	shmem_recalc_inode(inode);
+	spin_unlock(&info->lock);
+
+	/* Question: We should update? */
+	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
+}
+EXPORT_SYMBOL_GPL(shmem_purge_page);
+
 /*
  * Remove range of pages and swap entries from radix tree, and free them.
  * If !unfalloc, truncate or punch hole; if unfalloc, undo failed fallocate.

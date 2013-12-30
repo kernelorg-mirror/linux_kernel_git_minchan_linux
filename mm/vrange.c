@@ -13,6 +13,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/mm_inline.h>
 #include <linux/migrate.h>
+#include <linux/shmem_fs.h>
 
 static struct kmem_cache *vrange_cachep;
 
@@ -638,6 +639,7 @@ static int try_to_discard_file_vpage(struct page *page)
 	}
 
 	VM_BUG_ON(page_mapped(page));
+	shmem_purge_page(mapping->host, page);
 	ret = 0;
 out:
 	vrange_unlock(vroot);
