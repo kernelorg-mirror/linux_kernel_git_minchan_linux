@@ -57,6 +57,7 @@
 #include <linux/migrate.h>
 #include <linux/hugetlb.h>
 #include <linux/backing-dev.h>
+#include <linux/vrange.h>
 
 #include <asm/tlbflush.h>
 
@@ -685,7 +686,7 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		if (vma->vm_flags & VM_LOCKED) {
 			spin_unlock(&mm->page_table_lock);
 			*mapcount = 0;	/* break early from loop */
-			*vm_flags |= VM_LOCKED;
+			*vm_flags &= VM_LOCKED;
 			goto out;
 		}
 
@@ -708,7 +709,7 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		if (vma->vm_flags & VM_LOCKED) {
 			pte_unmap_unlock(pte, ptl);
 			*mapcount = 0;	/* break early from loop */
-			*vm_flags |= VM_LOCKED;
+			*vm_flags &= VM_LOCKED;
 			goto out;
 		}
 
@@ -724,12 +725,18 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 				referenced++;
 		}
 		pte_unmap_unlock(pte, ptl);
+		if (*vm_flags & VM_VRANGE &&
+				vrange_addr_volatile(vma, address)) {
+			*mapcount = 0; /* break ealry from loop */
+			*vm_flags &= VM_VRANGE;
+			goto out;
+		}
 	}
 
 	(*mapcount)--;
 
 	if (referenced)
-		*vm_flags |= vma->vm_flags;
+		*vm_flags &= vma->vm_flags;
 out:
 	return referenced;
 }
@@ -844,6 +851,9 @@ static int page_referenced_file(struct page *page,
  *
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
+ *
+ * NOTE: caller should pass interested flags in vm_flags to collect
+ * vma->vm_flags.
  */
 int page_referenced(struct page *page,
 		    int is_locked,
@@ -853,7 +863,6 @@ int page_referenced(struct page *page,
 	int referenced = 0;
 	int we_locked = 0;
 
-	*vm_flags = 0;
 	if (page_mapped(page) && page_rmapping(page)) {
 		if (!is_locked && (!PageAnon(page) || PageKsm(page))) {
 			we_locked = trylock_page(page);
