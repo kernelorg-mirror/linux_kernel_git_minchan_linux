@@ -1,0 +1,29 @@
+* v10-rc5
+  - reordering/merge patches
+  - correct build break
+  - tidy up some variable
+  - add tracepoint
+  - rc4 bug fix
+
+* v10-rc4
+  - change purging trigger policy
+  - change vrange_list mutex lock with spin_lock
+  - fix not initialize purged variable
+  - use cached address for next scanning
+  - remove page_referenced's dirty is_vrange
+  - support THP
+
+* v10-rc3
+  - fix discarding file vpage
+  - support shmem_purge_page
+  - use GFP_KERNEL instead of GFP_NOFS in vroot_alloc_vma
+  - fix update page->mapping in shrink_page_list
+  - fix fault handler retrying logic for tmpfs/shmem pages
+
+* v10-rc2
+  - rebased on v3.12, shrinker interface
+
+* v10-rc1
+  - fix SLAB_DESTROY_BY_RCU
+  - fix wrong free of vroot
+  - fix finding purged address
