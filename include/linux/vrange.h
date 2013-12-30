@@ -3,6 +3,8 @@
 
 #include <linux/vrange_types.h>
 #include <linux/mm.h>
+#include <linux/swap.h>
+#include <linux/swapops.h>
 
 #define vrange_from_node(node_ptr) \
 	container_of(node_ptr, struct vrange, node)
@@ -11,6 +13,16 @@
 	container_of(ptr, struct vrange, node.rb)
 
 #ifdef CONFIG_MMU
+
+static inline swp_entry_t make_vrange_entry(void)
+{
+	return swp_entry(SWP_VRANGE, 0);
+}
+
+static inline int is_vrange_entry(swp_entry_t entry)
+{
+	return swp_type(entry) == SWP_VRANGE;
+}
 
 static inline void vrange_root_init(struct vrange_root *vroot, int type,
 								void *object)
@@ -43,7 +55,8 @@ extern int vrange_fork(struct mm_struct *new,
 					struct mm_struct *old);
 int discard_vpage(struct page *page);
 bool vrange_addr_volatile(struct vm_area_struct *vma, unsigned long addr);
-
+extern bool vrange_addr_purged(struct vm_area_struct *vma,
+				unsigned long address);
 #else
 
 static inline void vrange_root_init(struct vrange_root *vroot,
@@ -60,5 +73,7 @@ static inline bool vrange_addr_volatile(struct vm_area_struct *vma,
 	return false;
 }
 static inline int discard_vpage(struct page *page) { return 0 };
+static inline bool vrange_addr_purged(struct vm_area_struct *vma,
+				unsigned long address);
 #endif
 #endif /* _LINIUX_VRANGE_H */

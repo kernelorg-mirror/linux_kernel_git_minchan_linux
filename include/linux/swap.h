@@ -49,6 +49,9 @@ static inline int current_is_kswapd(void)
  * actions on faults.
  */
 
+#define SWP_VRANGE_NUM 1
+#define SWP_VRANGE	(MAX_SWAPFILES + SWP_HWPOISON_NUM + SWP_MIGRATION_NUM)
+
 /*
  * NUMA node memory migration support
  */
@@ -71,7 +74,8 @@ static inline int current_is_kswapd(void)
 #endif
 
 #define MAX_SWAPFILES \
-	((1 << MAX_SWAPFILES_SHIFT) - SWP_MIGRATION_NUM - SWP_HWPOISON_NUM)
+	((1 << MAX_SWAPFILES_SHIFT) - SWP_MIGRATION_NUM - SWP_HWPOISON_NUM \
+			- SWP_VRANGE_NUM)
 
 /*
  * Magic header for a swap area. The first part of the union is

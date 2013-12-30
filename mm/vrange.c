@@ -431,6 +431,24 @@ bool vrange_addr_volatile(struct vm_area_struct *vma, unsigned long addr)
 	return ret;
 }
 
+bool vrange_addr_purged(struct vm_area_struct *vma, unsigned long addr)
+{
+	struct vrange_root *vroot;
+	struct vrange *range;
+	unsigned long vstart_idx;
+	bool ret = false;
+
+	vroot = __vma_to_vroot(vma);
+	vstart_idx = __vma_addr_to_index(vma, addr);
+
+	vrange_lock(vroot);
+	range = __vrange_find(vroot, vstart_idx, vstart_idx);
+	if (range && range->purged)
+		ret = true;
+	vrange_unlock(vroot);
+	return ret;
+}
+
 /* Caller should hold vrange_lock */
 static void do_purge(struct vrange_root *vroot,
 		unsigned long start_idx, unsigned long end_idx)
@@ -474,6 +492,7 @@ static void try_to_discard_one(struct vrange_root *vroot, struct page *page,
 	page_remove_rmap(page);
 	page_cache_release(page);
 
+	set_pte_at(mm, addr, pte, swp_entry_to_pte(make_vrange_entry()));
 	pte_unmap_unlock(pte, ptl);
 	mmu_notifier_invalidate_page(mm, addr);
 
