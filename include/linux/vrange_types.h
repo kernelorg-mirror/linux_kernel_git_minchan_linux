@@ -20,7 +20,8 @@ struct vrange_root {
 struct vrange {
 	struct interval_tree_node node;
 	struct vrange_root *owner;
-	int purged;
+	/* purged */
+	unsigned long hint;
 	struct list_head lru;
 	atomic_t refcount;
 };

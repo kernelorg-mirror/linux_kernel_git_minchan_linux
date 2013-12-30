@@ -29,6 +29,24 @@ struct vrange_walker {
 	struct list_head *pagelist;
 };
 
+#define VRANGE_PURGED_MARK	0
+
+void mark_purge(struct vrange *range)
+{
+	range->hint |= (1 << VRANGE_PURGED_MARK);
+}
+
+void clear_purge(struct vrange *range)
+{
+	range->hint &= ~(1 << VRANGE_PURGED_MARK);
+}
+
+bool vrange_purged(struct vrange *range)
+{
+	bool purged = range->hint & (1 << VRANGE_PURGED_MARK);
+	return purged;
+}
+
 static inline unsigned long vrange_size(struct vrange *range)
 {
 	return range->node.last + 1 - range->node.start;
@@ -217,7 +235,7 @@ static struct vrange *__vrange_alloc(gfp_t flags)
 		return vrange;
 
 	vrange->owner = NULL;
-	vrange->purged = 0;
+	vrange->hint = 0;
 	INIT_LIST_HEAD(&vrange->lru);
 	atomic_set(&vrange->refcount, 1);
 
@@ -288,14 +306,17 @@ static inline void __vrange_set(struct vrange *range,
 {
 	range->node.start = start_idx;
 	range->node.last = end_idx;
-	range->purged = purged;
+	if (purged)
+		mark_purge(range);
+	else
+		clear_purge(range);
 }
 
 static inline void __vrange_resize(struct vrange *range,
 		unsigned long start_idx, unsigned long end_idx)
 {
 	struct vrange_root *vroot = range->owner;
-	bool purged = range->purged;
+	bool purged = vrange_purged(range);
 
 	__vrange_remove(range);
 	__vrange_lru_del(range);
@@ -341,7 +362,7 @@ static int vrange_add(struct vrange_root *vroot,
 
 		start_idx = min_t(unsigned long, start_idx, node->start);
 		end_idx = max_t(unsigned long, end_idx, node->last);
-		purged |= range->purged;
+		purged |= vrange_purged(range);
 
 		__vrange_remove(range);
 		__vrange_put(range);
@@ -383,7 +404,7 @@ static int vrange_remove(struct vrange_root *vroot,
 		next = interval_tree_iter_next(node, start_idx, end_idx);
 		range = vrange_from_node(node);
 
-		*purged |= range->purged;
+		*purged |= vrange_purged(range);
 
 		if (start_idx <= node->start && end_idx >= node->last) {
 			/* argumented range covers the range fully */
@@ -409,7 +430,7 @@ static int vrange_remove(struct vrange_root *vroot,
 			used_new = true;
 			__vrange_resize(range, node->start, start_idx - 1);
 			__vrange_set(new_range, end_idx + 1, last,
-					range->purged);
+					vrange_purged(range));
 			__vrange_add(new_range, vroot);
 			break;
 		}
@@ -492,7 +513,7 @@ int vrange_fork(struct mm_struct *new_mm, struct mm_struct *old_mm)
 		if (!new_range)
 			goto fail;
 		__vrange_set(new_range, range->node.start,
-					range->node.last, range->purged);
+				range->node.last, vrange_purged(range));
 		__vrange_add(new_range, new);
 
 	}
@@ -736,7 +757,7 @@ bool vrange_addr_purged(struct vm_area_struct *vma, unsigned long addr)
 
 	vrange_lock(vroot);
 	range = __vrange_find(vroot, vstart_idx, vstart_idx);
-	if (range && range->purged)
+	if (range && vrange_purged(range))
 		ret = true;
 
 	vrange_unlock(vroot);
@@ -753,7 +774,7 @@ static void do_purge(struct vrange_root *vroot,
 	node = interval_tree_iter_first(&vroot->v_rb, start_idx, end_idx);
 	while (node) {
 		range = container_of(node, struct vrange, node);
-		range->purged = true;
+		mark_purge(range);
 		node = interval_tree_iter_next(node, start_idx, end_idx);
 	}
 }
