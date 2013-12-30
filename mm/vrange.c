@@ -13,6 +13,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/mm_inline.h>
 #include <linux/migrate.h>
+#include <linux/pagevec.h>
 #include <linux/shmem_fs.h>
 
 static struct kmem_cache *vrange_cachep;
@@ -853,23 +854,63 @@ out:
 	return ret;
 }
 
-static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard)
+static int __discard_vrange_file(struct address_space *mapping,
+			struct vrange *vrange, unsigned long *ret_discard)
 {
-	int ret = 0;
-	struct mm_struct *mm;
-	struct vrange_root *vroot;
-	vroot = vrange->owner;
+	struct pagevec pvec;
+	pgoff_t index;
+	int i, ret = 0;
+	unsigned long nr_discard = 0;
+	unsigned long start_idx = vrange->node.start;
+	unsigned long end_idx = vrange->node.last;
+	const pgoff_t start = start_idx >> PAGE_CACHE_SHIFT;
+	pgoff_t end = end_idx >> PAGE_CACHE_SHIFT;
+	LIST_HEAD(pagelist);
 
-	/* TODO : handle VRANGE_FILE */
-	if (vroot->type != VRANGE_MM)
-		goto out;
+	pagevec_init(&pvec, 0);
+	index = start;
+	while (index <= end && pagevec_lookup(&pvec, mapping, index,
+			min(end - index, (pgoff_t)PAGEVEC_SIZE - 1) + 1)) {
+		for (i = 0; i < pagevec_count(&pvec); i++) {
+			struct page *page = pvec.pages[i];
+			index = page->index;
+			if (index > end)
+				break;
+			if (isolate_lru_page(page))
+				continue;
+			list_add(&page->lru, &pagelist);
+			inc_zone_page_state(page, NR_ISOLATED_ANON);
+		}
+		pagevec_release(&pvec);
+		cond_resched();
+		index++;
+	}
 
-	mm = vroot->object;
-	ret = __discard_vrange_anon(mm, vrange, nr_discard);
-out:
+	if (!list_empty(&pagelist))
+		nr_discard = discard_vrange_pagelist(&pagelist);
+
+	*ret_discard = nr_discard;
+	putback_lru_pages(&pagelist);
+
 	return ret;
 }
 
+static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard)
+{
+	int ret = 0;
+	struct vrange_root *vroot;
+	vroot = vrange->owner;
+
+	if (vroot->type == VRANGE_MM) {
+		struct mm_struct *mm = vroot->object;
+		ret = __discard_vrange_anon(mm, vrange, nr_discard);
+	} else if (vroot->type == VRANGE_FILE) {
+		struct address_space *mapping = vroot->object;
+		ret = __discard_vrange_file(mapping, vrange, nr_discard);
+	}
+
+	return ret;
+}
 
 #define VRANGE_SCAN_THRESHOLD	(4 << 20)
 
