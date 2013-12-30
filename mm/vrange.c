@@ -1223,6 +1223,7 @@ static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard,
 {
 	int ret = 0;
 	struct vrange_root *vroot;
+	unsigned long total_scan = *scan;
 	vroot = vrange->owner;
 
 	vroot = vrange_get_vroot(vrange);
@@ -1244,6 +1245,19 @@ static int discard_vrange(struct vrange *vrange, unsigned long *nr_discard,
 		ret = __discard_vrange_file(mapping, vrange, nr_discard, scan);
 	}
 
+	if (!ret) {
+		if (current_is_kswapd())
+			count_vm_events(PGDISCARD_KSWAPD, *nr_discard);
+		else
+			count_vm_events(PGDISCARD_DIRECT, *nr_discard);
+	}
+
+	if (current_is_kswapd())
+		count_vm_events(PGVSCAN_KSWAPD,
+				(total_scan - *scan) >> PAGE_SHIFT);
+	else
+		count_vm_events(PGVSCAN_DIRECT,
+				(total_scan - *scan) >> PAGE_SHIFT);
 out:
 	__vroot_put(vroot);
 	return ret;

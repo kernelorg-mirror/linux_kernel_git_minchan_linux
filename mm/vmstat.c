@@ -789,6 +789,12 @@ const char * const vmstat_text[] = {
 
 	"pgfault",
 	"pgmajfault",
+	"pgvscan_kswapd",
+	"pgvscan_direct",
+	"pgdiscard_kswapd",
+	"pgdiscard_direct",
+	"pgdiscard_rescued",
+	"pgdiscard_save_reclaim",
 
 	TEXTS_FOR_ZONES("pgrefill")
 	TEXTS_FOR_ZONES("pgsteal_kswapd")

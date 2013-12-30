@@ -886,8 +886,10 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * because page->mapping could be NULL if it's purged.
 		 */
 		case PAGEREF_DISCARD:
-			if (may_enter_fs && discard_vpage(page) == 0)
+			if (may_enter_fs && discard_vpage(page) == 0) {
+				count_vm_event(PGDISCARD_RESCUED);
 				goto free_it;
+			}
 		case PAGEREF_KEEP:
 			goto keep_locked;
 		case PAGEREF_RECLAIM:
@@ -1768,8 +1770,10 @@ static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
 	unsigned long nr_reclaimed;
 
 	nr_reclaimed = shrink_vrange(lru, lruvec, sc);
-	if (nr_reclaimed >= sc->nr_to_reclaim)
+	if (nr_reclaimed >= sc->nr_to_reclaim) {
+		count_vm_event(PGDISCARD_SAVE_RECLAIM);
 		return nr_reclaimed;
+	}
 
 	if (is_active_lru(lru)) {
 		if (inactive_list_is_low(lruvec, lru))
