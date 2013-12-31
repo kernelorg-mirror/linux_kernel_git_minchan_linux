@@ -16,6 +16,9 @@
 #include <linux/pagevec.h>
 #include <linux/shmem_fs.h>
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/vrange.h>
+
 static struct kmem_cache *vrange_cachep;
 static struct kmem_cache *vroot_cachep;
 
@@ -1331,6 +1334,9 @@ unsigned long shrink_vrange(enum lru_list lru, struct lruvec *lruvec,
 		if (total_reclaimed >= nr_to_reclaim)
 			break;
 	}
+
+	trace_shrink_vrange(lruvec, sc, total_reclaimed,
+		(VRANGE_SCAN_THRESHOLD - remained_scan) >> PAGE_SHIFT);
 
 	return total_reclaimed;
 }
