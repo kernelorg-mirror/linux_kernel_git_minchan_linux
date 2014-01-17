@@ -13,12 +13,39 @@
 /* A global variable is a bit ugly, but it keeps the code simple */
 int sysctl_drop_caches;
 
+void dump_reclaimed_pages(struct inode *inode, unsigned long nr_pages,
+			unsigned long nr_extra)
+{
+	struct dentry *dentry;
+	int len = 8;
+	char *name_buf, *name = "unknown";
+
+	name_buf = (char *)__get_free_page(GFP_TEMPORARY);
+
+	dentry = d_find_alias(inode);
+	if (dentry)
+		name = dentry_path_raw(dentry, name_buf, PAGE_SIZE);
+
+	if (!IS_ERR(name))
+		len = PAGE_SIZE + name_buf - name;
+
+	printk("%s reclaim_pages %lu extra_pages %lu\n", name ,
+		nr_pages, nr_extra);
+
+	if (dentry)
+		dput(dentry);
+
+	free_page((unsigned long)name_buf);
+}
+
 static void drop_pagecache_sb(struct super_block *sb, void *unused)
 {
 	struct inode *inode, *toput_inode = NULL;
-
 	spin_lock(&inode_sb_list_lock);
 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+		unsigned long nr_reclaimed;
+		unsigned long before, after;
+
 		spin_lock(&inode->i_lock);
 		if ((inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)) ||
 		    (inode->i_mapping->nrpages == 0)) {
@@ -28,7 +55,11 @@ static void drop_pagecache_sb(struct super_block *sb, void *unused)
 		__iget(inode);
 		spin_unlock(&inode->i_lock);
 		spin_unlock(&inode_sb_list_lock);
-		invalidate_mapping_pages(inode->i_mapping, 0, -1);
+		before = global_page_state(NR_FREE_PAGES);
+		nr_reclaimed =
+			invalidate_mapping_pages(inode->i_mapping, 0, -1);
+		after = global_page_state(NR_FREE_PAGES);
+		dump_reclaimed_pages(inode, nr_reclaimed, after - before);
 		iput(toput_inode);
 		toput_inode = inode;
 		spin_lock(&inode_sb_list_lock);
