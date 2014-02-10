@@ -377,6 +377,15 @@ void __init anon_vma_init(void)
 	anon_vma_chain_cachep = KMEM_CACHE(anon_vma_chain, SLAB_PANIC);
 }
 
+static inline bool is_anon_vma(unsigned long mapping)
+{
+	unsigned long anon_mapping = mapping & PAGE_MAPPING_FLAGS;
+	if ((anon_mapping != PAGE_MAPPING_ANON) &&
+	    (anon_mapping != (PAGE_MAPPING_ANON|PAGE_MAPPING_LZFREE)))
+		return false;
+	return true;
+}
+
 /*
  * Getting a lock on a stable anon_vma from a page off the LRU is tricky!
  *
@@ -407,7 +416,7 @@ struct anon_vma *page_get_anon_vma(struct page *page)
 
 	rcu_read_lock();
 	anon_mapping = (unsigned long) ACCESS_ONCE(page->mapping);
-	if ((anon_mapping & PAGE_MAPPING_FLAGS) != PAGE_MAPPING_ANON)
+	if (!is_anon_vma(anon_mapping))
 		goto out;
 	if (!page_mapped(page))
 		goto out;
@@ -450,7 +459,7 @@ struct anon_vma *page_lock_anon_vma_read(struct page *page)
 
 	rcu_read_lock();
 	anon_mapping = (unsigned long) ACCESS_ONCE(page->mapping);
-	if ((anon_mapping & PAGE_MAPPING_FLAGS) != PAGE_MAPPING_ANON)
+	if (!is_anon_vma(anon_mapping))
 		goto out;
 	if (!page_mapped(page))
 		goto out;
@@ -1165,6 +1174,14 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		}
 		set_pte_at(mm, address, pte,
 			   swp_entry_to_pte(make_hwpoison_entry(page)));
+	} else if ((flags & TTU_LAZYFREE) && PageLazyFree(page)) {
+		BUG_ON(!PageAnon(page));
+		if (unlikely(pte_dirty(pteval))) {
+			set_pte_at(mm, address, pte, pteval);
+			ret = SWAP_FAIL;
+			goto out_unmap;
+		}
+		dec_mm_counter(mm, MM_ANONPAGES);
 	} else if (PageAnon(page)) {
 		swp_entry_t entry = { .val = page_private(page) };
 		pte_t swp_pte;

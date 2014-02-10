@@ -18,6 +18,7 @@
 #include <linux/pagevec.h>
 #include <linux/migrate.h>
 #include <linux/page_cgroup.h>
+#include <linux/ksm.h>
 
 #include <asm/pgtable.h>
 
@@ -256,8 +257,36 @@ void free_page_and_swap_cache(struct page *page)
 }
 
 /*
+ * move @page to inactive LRU's tail so that VM can discard it
+ * rather than swapping hot pages out when memory pressure happens.
+ */
+static bool move_lazyfree(struct page *page)
+{
+	if (!trylock_page(page))
+		return false;
+
+	if (PageKsm(page)) {
+		unlock_page(page);
+		return false;
+	}
+
+	if (PageSwapCache(page) &&
+			try_to_free_swap(page))
+		ClearPageDirty(page);
+
+	if (!PageLazyFree(page)) {
+		SetPageLazyFree(page);
+		deactivate_page(page);
+	}
+
+	unlock_page(page);
+	return true;
+}
+
+/*
  * Passed an array of pages, drop them all from swapcache and then release
  * them.  They are removed from the LRU and freed if this is their last use.
+ * If page passed are lazyfree, deactivate them intead of freeing.
  */
 void free_pages_and_swap_cache(struct page **pages, int nr)
 {
@@ -269,7 +298,12 @@ void free_pages_and_swap_cache(struct page **pages, int nr)
 		int i;
 
 		for (i = 0; i < todo; i++)
-			free_swap_cache(pagep[i]);
+			if (LazyFree(pagep[i])) {
+				pagep[i] = ClearLazyFree(pagep[i]);
+				move_lazyfree(pagep[i]);
+			} else {
+				free_swap_cache(pagep[i]);
+			}
 		release_pages(pagep, todo, 0);
 		pagep += todo;
 		nr -= todo;

@@ -75,6 +75,7 @@ enum ttu_flags {
 	TTU_UNMAP = 0,			/* unmap mode */
 	TTU_MIGRATION = 1,		/* migration mode */
 	TTU_MUNLOCK = 2,		/* munlock mode */
+	TTU_LAZYFREE  = 3,		/* free lazyfree page */
 	TTU_ACTION_MASK = 0xff,
 
 	TTU_IGNORE_MLOCK = (1 << 8),	/* ignore mlock */

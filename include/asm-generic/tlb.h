@@ -116,7 +116,16 @@ void tlb_gather_mmu(struct mmu_gather *tlb, struct mm_struct *mm, unsigned long 
 void tlb_flush_mmu(struct mmu_gather *tlb);
 void tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start,
 							unsigned long end);
+int __tlb_madvfree_page(struct mmu_gather *tlb, struct page *page);
 int __tlb_remove_page(struct mmu_gather *tlb, struct page *page);
+
+static inline void tlb_madvfree_page(struct mmu_gather *tlb, struct page *page)
+{
+	/* Prevent page free */
+	get_page(page);
+	if (!__tlb_remove_page(tlb, MarkLazyFree(page)))
+		tlb_flush_mmu(tlb);
+}
 
 /* tlb_remove_page
  *	Similar to __tlb_remove_page but will call tlb_flush_mmu() itself when

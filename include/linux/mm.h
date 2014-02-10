@@ -933,10 +933,16 @@ void page_address_init(void);
  * Please note that, confusingly, "page_mapping" refers to the inode
  * address_space which maps the page from disk; whereas "page_mapped"
  * refers to user virtual address space into which the page is mapped.
+ *
+ * PAGE_MAPPING_LZFREE bit is set along with PAGE_MAPPING_ANON bit
+ * and then page->mapping points to an anon_vma. This flag is used
+ * for lazy freeing the page instead of swap.
  */
 #define PAGE_MAPPING_ANON	1
 #define PAGE_MAPPING_KSM	2
-#define PAGE_MAPPING_FLAGS	(PAGE_MAPPING_ANON | PAGE_MAPPING_KSM)
+#define PAGE_MAPPING_LZFREE	4
+#define PAGE_MAPPING_FLAGS	(PAGE_MAPPING_ANON | PAGE_MAPPING_KSM | \
+				 PAGE_MAPPING_LZFREE)
 
 extern struct address_space *page_mapping(struct page *page);
 
@@ -960,6 +966,32 @@ struct address_space *page_file_mapping(struct page *page)
 static inline int PageAnon(struct page *page)
 {
 	return ((unsigned long)page->mapping & PAGE_MAPPING_ANON) != 0;
+}
+
+static inline void SetPageLazyFree(struct page *page)
+{
+	BUG_ON(!PageAnon(page));
+	BUG_ON(!PageLocked(page));
+
+	page->mapping = (void *)((unsigned long)page->mapping |
+			PAGE_MAPPING_LZFREE);
+}
+
+static inline void ClearPageLazyFree(struct page *page)
+{
+	BUG_ON(!PageAnon(page));
+	BUG_ON(!PageLocked(page));
+
+	page->mapping = (void *)((unsigned long)page->mapping &
+				~PAGE_MAPPING_LZFREE);
+}
+
+static inline int PageLazyFree(struct page *page)
+{
+	if (((unsigned long)page->mapping & PAGE_MAPPING_FLAGS) ==
+			(PAGE_MAPPING_ANON|PAGE_MAPPING_LZFREE))
+		return 1;
+	return 0;
 }
 
 /*
@@ -1054,6 +1086,7 @@ struct zap_details {
 	struct address_space *check_mapping;	/* Check page->mapping if set */
 	pgoff_t	first_index;			/* Lowest page->index to unmap */
 	pgoff_t last_index;			/* Highest page->index to unmap */
+	int lazy_free;				/* do lazy free */
 };
 
 struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,

@@ -13,6 +13,21 @@
 #include <linux/page-flags.h>
 #include <asm/page.h>
 
+static inline struct page *MarkLazyFree(struct page *p)
+{
+	return (struct page *)((unsigned long)p | 0x1UL);
+}
+
+static inline struct page *ClearLazyFree(struct page *p)
+{
+	return (struct page *)((unsigned long)p & ~0x1UL);
+}
+
+static inline bool LazyFree(struct page *p)
+{
+	return ((unsigned long)p & 0x1UL) ? true : false;
+}
+
 struct notifier_block;
 
 struct bio;
