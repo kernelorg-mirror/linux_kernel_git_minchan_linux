@@ -412,7 +412,7 @@ struct anon_vma *page_get_anon_vma(struct page *page)
 	if (!page_mapped(page))
 		goto out;
 
-	anon_vma = (struct anon_vma *) (anon_mapping - PAGE_MAPPING_ANON);
+	anon_vma = page_rmapping(page);
 	if (!atomic_inc_not_zero(&anon_vma->refcount)) {
 		anon_vma = NULL;
 		goto out;
@@ -455,7 +455,7 @@ struct anon_vma *page_lock_anon_vma_read(struct page *page)
 	if (!page_mapped(page))
 		goto out;
 
-	anon_vma = (struct anon_vma *) (anon_mapping - PAGE_MAPPING_ANON);
+	anon_vma = page_rmapping(page);
 	root_anon_vma = ACCESS_ONCE(anon_vma->root);
 	if (down_read_trylock(&root_anon_vma->rwsem)) {
 		/*
