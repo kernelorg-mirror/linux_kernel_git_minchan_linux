@@ -643,14 +643,11 @@ void add_page_to_unevictable_list(struct page *page)
  * If the page isn't page_mapped and dirty/writeback, the page
  * could reclaim asap using PG_reclaim.
  *
- * 1. active, mapped page -> none
- * 2. active, dirty/writeback page -> inactive, head, PG_reclaim
- * 3. inactive, mapped page -> none
- * 4. inactive, dirty/writeback page -> inactive, head, PG_reclaim
- * 5. inactive, clean -> inactive, tail
- * 6. Others -> none
+ * 1. file mapped page -> none
+ * 2. dirty/writeback page -> head of inactive with PG_reclaim
+ * 3. inactive, clean -> tail of inactive
  *
- * In 4, why it moves inactive's head, the VM expects the page would
+ * In 2, why it moves inactive's head, the VM expects the page would
  * be write it out by flusher threads as this is much more effective
  * than the single-page writeout from reclaim.
  */
@@ -667,7 +664,7 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 		return;
 
 	/* Some processes are using the page */
-	if (page_mapped(page))
+	if (!PageAnon(page) && page_mapped(page))
 		return;
 
 	active = PageActive(page);
@@ -677,7 +674,6 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 	del_page_from_lru_list(page, lruvec, lru + active);
 	ClearPageActive(page);
 	ClearPageReferenced(page);
-	add_page_to_lru_list(page, lruvec, lru);
 
 	if (PageWriteback(page) || PageDirty(page)) {
 		/*
@@ -686,12 +682,16 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 		 * is _really_ small and  it's non-critical problem.
 		 */
 		SetPageReclaim(page);
+		add_page_to_lru_list(page, lruvec, lru);
 	} else {
 		/*
 		 * The page's writeback ends up during pagevec
 		 * We moves tha page into tail of inactive.
+		 *
+		 * The lazyfree page move into lru's tail to
+		 * discard easily.
 		 */
-		list_move_tail(&page->lru, &lruvec->lists[lru]);
+		add_page_to_lru_list_tail(page, lruvec, lru);
 		__count_vm_event(PGROTATED);
 	}
 
