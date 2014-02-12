@@ -470,7 +470,8 @@ static struct page *get_mergeable_page(struct rmap_item *rmap_item)
 	page = follow_page(vma, addr, FOLL_GET);
 	if (IS_ERR_OR_NULL(page))
 		goto out;
-	if (PageAnon(page) || page_trans_compound_anon(page)) {
+	if ((PageAnon(page) && !PageLazyFree(page)) ||
+			page_trans_compound_anon(page)) {
 		flush_anon_page(vma, page, addr);
 		flush_dcache_page(page);
 	} else {
@@ -1032,13 +1033,20 @@ static int try_to_merge_one_page(struct vm_area_struct *vma,
 
 	/*
 	 * We need the page lock to read a stable PageSwapCache in
-	 * write_protect_page().  We use trylock_page() instead of
-	 * lock_page() because we don't want to wait here - we
-	 * prefer to continue scanning and merging different pages,
+	 * write_protect_page() and check lazyfree.
+	 * We use trylock_page() instead of lock_page() because we
+	 * don't want to wait here - we prefer to continue scanning
+	 * and merging different pages,
 	 * then come back to this page when it is unlocked.
 	 */
 	if (!trylock_page(page))
 		goto out;
+
+	if (PageLazyFree(page)) {
+		unlock_page(page);
+		goto out;
+	}
+
 	/*
 	 * If this anonymous page is mapped only here, its pte may need
 	 * to be write-protected.  If it's mapped elsewhere, all of its
@@ -1621,7 +1629,7 @@ next_mm:
 				cond_resched();
 				continue;
 			}
-			if (PageAnon(*page) ||
+			if ((PageAnon(*page) && !PageLazyFree(*page)) ||
 			    page_trans_compound_anon(*page)) {
 				flush_anon_page(vma, *page, ksm_scan.address);
 				flush_dcache_page(*page);
