@@ -975,6 +975,8 @@ static inline void SetPageLazyFree(struct page *page)
 
 	page->mapping = (void *)((unsigned long)page->mapping |
 			PAGE_MAPPING_LZFREE);
+
+	__inc_zone_page_state(page, NR_LAZYFREE_PAGES);
 }
 
 static inline void ClearPageLazyFree(struct page *page)
@@ -984,6 +986,8 @@ static inline void ClearPageLazyFree(struct page *page)
 
 	page->mapping = (void *)((unsigned long)page->mapping &
 				~PAGE_MAPPING_LZFREE);
+
+	__dec_zone_page_state(page, NR_LAZYFREE_PAGES);
 }
 
 static inline int PageLazyFree(struct page *page)

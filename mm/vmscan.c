@@ -832,6 +832,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				if (!page_freeze_refs(page, 1))
 					goto keep_locked;
 				unlock_page(page);
+				count_vm_event(PGLAZYFREE);
 				goto free_it;
 			}
 		}
