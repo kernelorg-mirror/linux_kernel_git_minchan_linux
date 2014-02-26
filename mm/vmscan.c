@@ -1889,8 +1889,13 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	if (!global_reclaim(sc))
 		force_scan = true;
 
-	/* If we have no swap space, do not bother scanning anon pages. */
-	if (!sc->may_swap || (get_nr_swap_pages() <= 0)) {
+	/*
+	 * If we have no swap space and lazyfree pages,
+	 * do not bother scanning anon pages.
+	 */
+	if (!sc->may_swap ||
+		(get_nr_swap_pages() <= 0 &&
+			zone_page_state(zone, NR_LAZYFREE_PAGES) <= 0)) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
