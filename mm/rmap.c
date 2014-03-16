@@ -1165,6 +1165,14 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		}
 		set_pte_at(mm, address, pte,
 			   swp_entry_to_pte(make_hwpoison_entry(page)));
+	} else if ((flags & TTU_LAZYFREE) && PageLazyFree(page)) {
+		BUG_ON(!PageAnon(page));
+		if (pte_dirty(pteval)) {
+			set_pte_at(mm, address, pte, pteval);
+			ret = SWAP_FAIL;
+			goto out_unmap;
+		}
+		dec_mm_counter(mm, MM_ANONPAGES);
 	} else if (PageAnon(page)) {
 		swp_entry_t entry = { .val = page_private(page) };
 		pte_t swp_pte;

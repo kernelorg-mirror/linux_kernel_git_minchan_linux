@@ -558,22 +558,6 @@ static inline int page_has_private(struct page *page)
 	return !PageAnon(page) && !!(page->flags & PAGE_FLAGS_PRIVATE);
 }
 
-static inline void SetPageLazyFree(struct page *page)
-{
-	BUG_ON(!PageAnon(page));
-	BUG_ON(!PageLocked(page));
-
-	__set_bit(PG_lazyfree, &(page->flags));
-}
-
-static inline void ClearPageLazyFree(struct page *page)
-{
-	BUG_ON(!PageAnon(page));
-	BUG_ON(!PageLocked(page));
-
-	__clear_bit(PG_lazyfree, &(page->flags));
-}
-
 static inline int PageLazyFree(struct page *page)
 {
 	int ret;
@@ -583,6 +567,23 @@ static inline int PageLazyFree(struct page *page)
 
 	ret = test_bit(PG_lazyfree, &(page)->flags);
 	return ret;
+}
+
+static inline void SetPageLazyFree(struct page *page)
+{
+	BUG_ON(!PageAnon(page));
+	BUG_ON(!PageLocked(page));
+	BUG_ON(PageLazyFree(page));
+
+	set_bit(PG_lazyfree, &(page->flags));
+}
+
+static inline void ClearPageLazyFree(struct page *page)
+{
+	BUG_ON(!PageAnon(page));
+	BUG_ON(!PageLazyFree(page));
+
+	clear_bit(PG_lazyfree, &(page->flags));
 }
 
 #endif /* !__GENERATING_BOUNDS_H */

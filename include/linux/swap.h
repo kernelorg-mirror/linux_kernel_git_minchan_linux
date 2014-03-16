@@ -17,6 +17,21 @@ struct notifier_block;
 
 struct bio;
 
+static inline struct page *MarkLazyFree(struct page *p)
+{
+	return (struct page *)((unsigned long)p | 0x1UL);
+}
+
+static inline struct page *ClearLazyFree(struct page *p)
+{
+	return (struct page *)((unsigned long)p & ~0x1UL);
+}
+
+static inline bool LazyFree(struct page *p)
+{
+	return ((unsigned long)p & 0x1UL) ? true : false;
+}
+
 #define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
 #define SWAP_FLAG_PRIO_MASK	0x7fff
 #define SWAP_FLAG_PRIO_SHIFT	0

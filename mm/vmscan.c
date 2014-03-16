@@ -817,6 +817,25 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 
 		sc->nr_scanned++;
 
+		if ((ttu_flags & TTU_LAZYFREE) && PageLazyFree(page)) {
+			switch (try_to_unmap(page, ttu_flags)) {
+			case SWAP_FAIL:
+				ClearPageLazyFree(page);
+				goto activate_locked;
+			case SWAP_AGAIN:
+				ClearPageLazyFree(page);
+				goto keep_locked;
+			case SWAP_SUCCESS:
+				ClearPageLazyFree(page);
+				if (unlikely(PageSwapCache(page)))
+					try_to_free_swap(page);
+				if (!page_freeze_refs(page, 1))
+					goto keep_locked;
+				unlock_page(page);
+				goto free_it;
+		}
+		}
+
 		if (unlikely(!page_evictable(page)))
 			goto cull_mlocked;
 
@@ -957,7 +976,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * processes. Try to unmap it here.
 		 */
 		if (page_mapped(page) && mapping) {
-			switch (try_to_unmap(page, ttu_flags)) {
+			switch (try_to_unmap(page,
+				(ttu_flags & ~TTU_LAZYFREE))) {
 			case SWAP_FAIL:
 				goto activate_locked;
 			case SWAP_AGAIN:
@@ -1481,7 +1501,8 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	if (nr_taken == 0)
 		return 0;
 
-	nr_reclaimed = shrink_page_list(&page_list, zone, sc, TTU_UNMAP,
+	nr_reclaimed = shrink_page_list(&page_list, zone, sc,
+				TTU_UNMAP|TTU_LAZYFREE,
 				&nr_dirty, &nr_unqueued_dirty, &nr_congested,
 				&nr_writeback, &nr_immediate,
 				false);

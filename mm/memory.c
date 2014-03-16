@@ -1093,6 +1093,14 @@ again:
 
 			page = vm_normal_page(vma, addr, ptent);
 			if (unlikely(details) && page) {
+				if (details->lazyfree && PageAnon(page)) {
+					ptent = pte_mkold(ptent);
+					ptent = pte_mkclean(ptent);
+					set_pte_at(mm, addr, pte, ptent);
+					tlb_remove_tlb_entry(tlb, pte, addr);
+					tlb_lazyfree_page(tlb, page);
+					continue;
+				}
 				/*
 				 * unmap_shared_mapping_pages() wants to
 				 * invalidate cache without truncating:
@@ -1276,7 +1284,8 @@ static void unmap_page_range(struct mmu_gather *tlb,
 	pgd_t *pgd;
 	unsigned long next;
 
-	if (details && !details->check_mapping && !details->nonlinear_vma)
+	if (details && !details->check_mapping && !details->nonlinear_vma &&
+		!details->lazyfree)
 		details = NULL;
 
 	BUG_ON(addr >= end);
