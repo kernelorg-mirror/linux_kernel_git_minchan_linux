@@ -21,7 +21,8 @@
  *
  * The PG_private bitflag is set on pagecache pages if they contain filesystem
  * specific data (which is normally at page->private). It can be used by
- * private allocations for its own usage.
+ * private allocations for its own usage. For anonymous page, it could be set
+ * for indicating lazyfree page.
  *
  * During initiation of disk I/O, PG_locked is set. This bit is set before I/O
  * and cleared when writeback _starts_ or when read _completes_. PG_writeback
@@ -84,6 +85,7 @@ enum pageflags {
 	PG_arch_1,
 	PG_reserved,
 	PG_private,		/* If pagecache, has fs-private data */
+				/* If anon, it means lazyfree page */
 	PG_private_2,		/* If pagecache, has fs aux data */
 	PG_writeback,		/* Page is under writeback */
 #ifdef CONFIG_PAGEFLAGS_EXTENDED
@@ -113,6 +115,9 @@ enum pageflags {
 
 	/* Filesystems */
 	PG_checked = PG_owner_priv_1,
+
+	/* Lazyfree */
+	PG_lazyfree = PG_private,
 
 	/* Two page bits are conscripted by FS-Cache to maintain local caching
 	 * state.  These bits are set on pages belonging to the netfs's inodes
@@ -551,6 +556,33 @@ static inline int PageAnon(struct page *page)
 static inline int page_has_private(struct page *page)
 {
 	return !PageAnon(page) && !!(page->flags & PAGE_FLAGS_PRIVATE);
+}
+
+static inline void SetPageLazyFree(struct page *page)
+{
+	BUG_ON(!PageAnon(page));
+	BUG_ON(!PageLocked(page));
+
+	__set_bit(PG_lazyfree, &(page->flags));
+}
+
+static inline void ClearPageLazyFree(struct page *page)
+{
+	BUG_ON(!PageAnon(page));
+	BUG_ON(!PageLocked(page));
+
+	__clear_bit(PG_lazyfree, &(page->flags));
+}
+
+static inline int PageLazyFree(struct page *page)
+{
+	int ret;
+
+	if (!PageAnon(page))
+		return 0;
+
+	ret = test_bit(PG_lazyfree, &(page)->flags);
+	return ret;
 }
 
 #endif /* !__GENERATING_BOUNDS_H */
