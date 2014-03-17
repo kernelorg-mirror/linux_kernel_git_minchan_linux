@@ -821,19 +821,23 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			switch (try_to_unmap(page, ttu_flags)) {
 			case SWAP_FAIL:
 				ClearPageLazyFree(page);
+				__dec_zone_page_state(page, NR_LAZYFREE_PAGES);
 				goto activate_locked;
 			case SWAP_AGAIN:
 				ClearPageLazyFree(page);
+				__dec_zone_page_state(page, NR_LAZYFREE_PAGES);
 				goto keep_locked;
 			case SWAP_SUCCESS:
 				ClearPageLazyFree(page);
+				__dec_zone_page_state(page, NR_LAZYFREE_PAGES);
 				if (unlikely(PageSwapCache(page)))
 					try_to_free_swap(page);
 				if (!page_freeze_refs(page, 1))
 					goto keep_locked;
 				unlock_page(page);
+				count_vm_event(PGLAZYFREED);
 				goto free_it;
-		}
+			}
 		}
 
 		if (unlikely(!page_evictable(page)))

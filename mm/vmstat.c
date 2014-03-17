@@ -742,6 +742,7 @@ const char * const vmstat_text[] = {
 	"nr_active_file",
 	"nr_unevictable",
 	"nr_mlock",
+	"nr_lazyfree_pages",
 	"nr_anon_pages",
 	"nr_mapped",
 	"nr_file_pages",
@@ -789,6 +790,7 @@ const char * const vmstat_text[] = {
 
 	"pgfault",
 	"pgmajfault",
+	"pglazyfreed",
 
 	TEXTS_FOR_ZONES("pgrefill")
 	TEXTS_FOR_ZONES("pgsteal_kswapd")

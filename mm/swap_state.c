@@ -276,6 +276,7 @@ static bool move_lazyfree(struct page *page)
 
 	if (!PageLazyFree(page)) {
 		SetPageLazyFree(page);
+		__inc_zone_page_state(page, NR_LAZYFREE_PAGES);
 		deactivate_page(page);
 	}
 

@@ -732,8 +732,10 @@ static bool free_pages_prepare(struct page *page, unsigned int order)
 	kmemcheck_free_shadow(page, order);
 
 	if (PageAnon(page)) {
-		if (unlikely(PageLazyFree(page)))
+		if (unlikely(PageLazyFree(page))) {
 			ClearPageLazyFree(page);
+			__dec_zone_page_state(page, NR_LAZYFREE_PAGES);
+		}
 		page->mapping = NULL;
 	}
 
