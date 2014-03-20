@@ -35,6 +35,7 @@
 #define MADV_WILLNEED	3		/* will need these pages */
 #define MADV_DONTNEED	4		/* don't need these pages */
 #define MADV_VICTIM	5		/* reclaim thes pages first */
+#define MADV_FREE	6		/* do lazy free */
 
 /* common parameters: try to keep these consistent across architectures */
 #define MADV_REMOVE	9		/* remove these pages & resources */

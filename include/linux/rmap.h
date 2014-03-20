@@ -235,6 +235,11 @@ struct anon_vma *page_lock_anon_vma_read(struct page *page);
 void page_unlock_anon_vma_read(struct anon_vma *anon_vma);
 int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma);
 
+struct rmap_private {
+	enum ttu_flags flags;
+	int dirtied;	/* used for lazyfree */
+};
+
 /*
  * rmap_walk_control: To control rmap traversing for specific needs
  *
@@ -289,5 +294,6 @@ static inline int page_mkclean(struct page *page)
 #define SWAP_AGAIN	1
 #define SWAP_FAIL	2
 #define SWAP_MLOCK	3
+#define SWAP_DISCARD	4
 
 #endif	/* _LINUX_RMAP_H */

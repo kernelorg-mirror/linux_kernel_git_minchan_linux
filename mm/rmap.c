@@ -1127,7 +1127,8 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	pte_t pteval;
 	spinlock_t *ptl;
 	int ret = SWAP_AGAIN;
-	enum ttu_flags flags = (enum ttu_flags)arg;
+	struct rmap_private *rp = (struct rmap_private *)arg;
+	enum ttu_flags flags = rp->flags;
 
 	pte = page_check_address(page, mm, address, &ptl, 0);
 	if (!pte)
@@ -1176,6 +1177,13 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		swp_entry_t entry = { .val = page_private(page) };
 		pte_t swp_pte;
 
+		/* discard lazyfree page if there was no write access */
+		if (!pte_dirty(pteval)) {
+			dec_mm_counter(mm, MM_ANONPAGES);
+			goto discard;
+		}
+
+		rp->dirtied++;
 		if (PageSwapCache(page)) {
 			/*
 			 * Store the swap location in the pte.
@@ -1217,6 +1225,7 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	} else
 		dec_mm_counter(mm, MM_FILEPAGES);
 
+discard:
 	page_remove_rmap(page);
 	page_cache_release(page);
 
@@ -1476,13 +1485,19 @@ static int page_not_mapped(struct page *page)
  * SWAP_AGAIN	- we missed a mapping, try again later
  * SWAP_FAIL	- the page is unswappable
  * SWAP_MLOCK	- page is mlocked.
+ * SWAP_DISCARD - we succedded but no need to swap out
  */
 int try_to_unmap(struct page *page, enum ttu_flags flags)
 {
 	int ret;
+
+	struct rmap_private rp = {
+		.flags = flags,
+	};
+
 	struct rmap_walk_control rwc = {
 		.rmap_one = try_to_unmap_one,
-		.arg = (void *)flags,
+		.arg = &rp,
 		.done = page_not_mapped,
 		.file_nonlinear = try_to_unmap_nonlinear,
 		.anon_lock = page_lock_anon_vma_read,
@@ -1503,8 +1518,12 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 
 	ret = rmap_walk(page, &rwc);
 
-	if (ret != SWAP_MLOCK && !page_mapped(page))
+	if (ret != SWAP_MLOCK && !page_mapped(page)) {
 		ret = SWAP_SUCCESS;
+		if (PageAnon(page) && !rp.dirtied)
+			ret = SWAP_DISCARD;
+	}
+
 	return ret;
 }
 
@@ -1526,9 +1545,13 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 int try_to_munlock(struct page *page)
 {
 	int ret;
+	struct rmap_private rp = {
+		.flags = TTU_MUNLOCK,
+	};
+
 	struct rmap_walk_control rwc = {
 		.rmap_one = try_to_unmap_one,
-		.arg = (void *)TTU_MUNLOCK,
+		.arg = &rp,
 		.done = page_not_mapped,
 		/*
 		 * We don't bother to try to find the munlocked page in

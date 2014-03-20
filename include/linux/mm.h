@@ -1041,6 +1041,8 @@ void zap_page_range(struct vm_area_struct *vma, unsigned long address,
 		unsigned long size, struct zap_details *);
 void victim_page_range(struct vm_area_struct *vma, unsigned long address,
 		unsigned long size);
+void lazyfree_range(struct vm_area_struct *vma, unsigned long address,
+		unsigned long size);
 void unmap_vmas(struct mmu_gather *tlb, struct vm_area_struct *start_vma,
 		unsigned long start, unsigned long end);
 

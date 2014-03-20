@@ -810,6 +810,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		int may_enter_fs;
 		enum page_references references = PAGEREF_RECLAIM_CLEAN;
 		bool dirty, writeback;
+		bool lazyfree = false;
 
 		cond_resched();
 
@@ -954,6 +955,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (PageAnon(page) && !PageSwapCache(page)) {
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
+			/* try_to_unmap will set dirty flag */
 			if (!add_to_swap(page, page_list))
 				goto activate_locked;
 			may_enter_fs = 1;
@@ -974,6 +976,14 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				goto keep_locked;
 			case SWAP_MLOCK:
 				goto cull_mlocked;
+			case SWAP_DISCARD:
+				if (PageSwapCache(page))
+					try_to_free_swap(page);
+				if (!page_freeze_refs(page, 1))
+					goto keep_locked;
+				__clear_page_locked(page);
+				count_vm_event(PGLAZYFREED);
+				goto free_it;
 			case SWAP_SUCCESS:
 				; /* try to free the page below */
 			}
@@ -1088,6 +1098,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		__clear_page_locked(page);
 free_it:
 		nr_reclaimed++;
+		if (lazyfree)
+			count_vm_event(PGLAZYFREED);
 
 		/*
 		 * Is there need to periodically free_page_list? It would

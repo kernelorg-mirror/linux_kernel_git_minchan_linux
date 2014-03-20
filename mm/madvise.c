@@ -32,6 +32,7 @@ static int madvise_need_mmap_write(int behavior)
 	case MADV_WILLNEED:
 	case MADV_DONTNEED:
 	case MADV_VICTIM:
+	case MADV_FREE:
 		return 0;
 	default:
 		/* be safe, default to 1. list exceptions explicitly */
@@ -253,6 +254,22 @@ static long madvise_willneed(struct vm_area_struct *vma,
 }
 
 static long madvise_victim(struct vm_area_struct *vma,
+			      struct vm_area_struct **prev,
+			     unsigned long start, unsigned long end)
+{
+	*prev = vma;
+	if (vma->vm_flags & (VM_LOCKED|VM_HUGETLB|VM_PFNMAP))
+		return -EINVAL;
+
+	/* madv_victim works for only anon vma */
+	if (vma->vm_file)
+		return -EINVAL;
+
+	victim_page_range(vma, start, end - start);
+	return 0;
+}
+
+static long madvise_free(struct vm_area_struct *vma,
 			     struct vm_area_struct **prev,
 			     unsigned long start, unsigned long end)
 {
@@ -264,7 +281,7 @@ static long madvise_victim(struct vm_area_struct *vma,
 	if (vma->vm_file)
 		return -EINVAL;
 
-	victim_page_range(vma, start, end - start);
+	lazyfree_range(vma, start, end - start);
 	return 0;
 }
 
@@ -403,6 +420,8 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		return madvise_willneed(vma, prev, start, end);
 	case MADV_VICTIM:
 		return madvise_victim(vma, prev, start, end);
+	case MADV_FREE:
+		return madvise_free(vma, prev, start, end);
 	case MADV_DONTNEED:
 		return madvise_dontneed(vma, prev, start, end);
 	default:
@@ -423,6 +442,7 @@ madvise_behavior_valid(int behavior)
 	case MADV_WILLNEED:
 	case MADV_DONTNEED:
 	case MADV_VICTIM:
+	case MADV_FREE:
 #ifdef CONFIG_KSM
 	case MADV_MERGEABLE:
 	case MADV_UNMERGEABLE:
