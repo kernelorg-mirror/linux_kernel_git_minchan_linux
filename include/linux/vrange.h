@@ -8,4 +8,6 @@
 #define VRANGE_VOLATILE 1
 #define VRANGE_VALID_FLAGS (0) /* Don't yet support any flags */
 
+extern int discard_vpage(struct page *page);
+
 #endif /* _LINUX_VRANGE_H */

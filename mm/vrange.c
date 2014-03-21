@@ -246,3 +246,117 @@ SYSCALL_DEFINE5(vrange, unsigned long, start, size_t, len, unsigned long, mode,
 out:
 	return ret;
 }
+
+
+/**
+ * try_to_discard_one - Purge a volatile page from a vma
+ *
+ * Finds the pte for a page in a vma, marks the pte as purged
+ * and release the page.
+ */
+static void try_to_discard_one(struct page *page, struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pte_t *pte;
+	pte_t pteval;
+	spinlock_t *ptl;
+	unsigned long addr;
+
+	VM_BUG_ON(!PageLocked(page));
+
+	addr = vma_address(page, vma);
+	pte = page_check_address(page, mm, addr, &ptl, 0);
+	if (!pte)
+		return;
+
+	BUG_ON(vma->vm_flags & (VM_SPECIAL|VM_LOCKED|VM_MIXEDMAP|VM_HUGETLB));
+
+	flush_cache_page(vma, addr, page_to_pfn(page));
+	pteval = ptep_clear_flush(vma, addr, pte);
+
+	update_hiwater_rss(mm);
+	if (PageAnon(page))
+		dec_mm_counter(mm, MM_ANONPAGES);
+	else
+		dec_mm_counter(mm, MM_FILEPAGES);
+
+	page_remove_rmap(page);
+	page_cache_release(page);
+
+	set_pte_at(mm, addr, pte,
+				swp_entry_to_pte(make_vpurged_entry()));
+
+	pte_unmap_unlock(pte, ptl);
+	mmu_notifier_invalidate_page(mm, addr);
+
+}
+
+/**
+ * try_to_discard_vpage - check vma chain and discard from vmas marked volatile
+ *
+ * Goes over all the vmas that hold a page, and where the vmas are volatile,
+ * purge the page from the vma.
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int try_to_discard_vpage(struct page *page)
+{
+	struct anon_vma *anon_vma;
+	struct anon_vma_chain *avc;
+	pgoff_t pgoff;
+
+	anon_vma = page_lock_anon_vma_read(page);
+	if (!anon_vma)
+		return -1;
+
+	pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	/*
+	 * During interating the loop, some processes could see a page as
+	 * purged while others could see a page as not-purged because we have
+	 * no global lock between parent and child for protecting vrange system
+	 * call during this loop. But it's not a problem because the page is
+	 * not *SHARED* page but *COW* page so parent and child can see other
+	 * data anytime. The worst case by this race is a page was purged
+	 * but couldn't be discarded so it makes unnecessary page fault but
+	 * it wouldn't be severe.
+	 */
+	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
+		struct vm_area_struct *vma = avc->vma;
+
+		if (!(vma->vm_flags & VM_VOLATILE))
+			continue;
+		try_to_discard_one(page, vma);
+	}
+	page_unlock_anon_vma_read(anon_vma);
+	return 0;
+}
+
+
+/**
+ * discard_vpage - If possible, discard the specified volatile page
+ *
+ * Attempts to discard a volatile page, and if needed frees the swap page
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int discard_vpage(struct page *page)
+{
+	VM_BUG_ON(!PageLocked(page));
+	VM_BUG_ON(PageLRU(page));
+
+	/* XXX - for now we only support anonymous volatile pages */
+	if (!PageAnon(page))
+		return -1;
+
+	if (!try_to_discard_vpage(page)) {
+		if (PageSwapCache(page))
+			try_to_free_swap(page);
+
+		if (page_freeze_refs(page, 1)) {
+			unlock_page(page);
+			return 0;
+		}
+	}
+
+	return -1;
+}

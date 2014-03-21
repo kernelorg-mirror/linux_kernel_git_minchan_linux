@@ -60,6 +60,7 @@
 #include <linux/migrate.h>
 #include <linux/string.h>
 #include <linux/dma-debug.h>
+#include <linux/vrange.h>
 
 #include <asm/io.h>
 #include <asm/pgalloc.h>
@@ -3643,6 +3644,8 @@ static int handle_pte_fault(struct mm_struct *mm,
 
 	entry = *pte;
 	if (!pte_present(entry)) {
+		swp_entry_t vrange_entry;
+retry:
 		if (pte_none(entry)) {
 			if (vma->vm_ops) {
 				if (likely(vma->vm_ops->fault))
@@ -3652,6 +3655,24 @@ static int handle_pte_fault(struct mm_struct *mm,
 			return do_anonymous_page(mm, vma, address,
 						 pte, pmd, flags);
 		}
+
+		vrange_entry = pte_to_swp_entry(entry);
+		if (unlikely(is_vpurged_entry(vrange_entry))) {
+			if (vma->vm_flags & VM_VOLATILE)
+				return VM_FAULT_SIGBUS;
+
+			/* zap pte */
+			ptl = pte_lockptr(mm, pmd);
+			spin_lock(ptl);
+			if (unlikely(!pte_same(*pte, entry)))
+				goto unlock;
+			flush_cache_page(vma, address, pte_pfn(*pte));
+			ptep_clear_flush(vma, address, pte);
+			pte_unmap_unlock(pte, ptl);
+			goto retry;
+		}
+
+
 		if (pte_file(entry))
 			return do_nonlinear_fault(mm, vma, address,
 					pte, pmd, flags, entry);

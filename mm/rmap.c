@@ -728,6 +728,11 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 				referenced++;
 		}
 		pte_unmap_unlock(pte, ptl);
+		if (vma->vm_flags & VM_VOLATILE) {
+			pra->mapcount = 0;
+			pra->vm_flags |= VM_VOLATILE;
+			return SWAP_FAIL;
+		}
 	}
 
 	if (referenced) {
