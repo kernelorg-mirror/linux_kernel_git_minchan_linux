@@ -70,8 +70,19 @@ static inline int current_is_kswapd(void)
 #define SWP_HWPOISON_NUM 0
 #endif
 
-#define MAX_SWAPFILES \
-	((1 << MAX_SWAPFILES_SHIFT) - SWP_MIGRATION_NUM - SWP_HWPOISON_NUM)
+
+/*
+ * Purged volatile range pages
+ */
+#define SWP_VRANGE_PURGED_NUM 1
+#define SWP_VRANGE_PURGED (MAX_SWAPFILES + SWP_HWPOISON_NUM + SWP_MIGRATION_NUM)
+
+
+#define MAX_SWAPFILES ((1 << MAX_SWAPFILES_SHIFT)	\
+				- SWP_MIGRATION_NUM	\
+				- SWP_HWPOISON_NUM	\
+				- SWP_VRANGE_PURGED_NUM	\
+			)
 
 /*
  * Magic header for a swap area. The first part of the union is

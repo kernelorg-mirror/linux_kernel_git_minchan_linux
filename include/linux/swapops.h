@@ -161,6 +161,16 @@ static inline int is_write_migration_entry(swp_entry_t entry)
 
 #endif
 
+static inline swp_entry_t make_vpurged_entry(void)
+{
+	return swp_entry(SWP_VRANGE_PURGED, 0);
+}
+
+static inline int is_vpurged_entry(swp_entry_t entry)
+{
+	return swp_type(entry) == SWP_VRANGE_PURGED;
+}
+
 #ifdef CONFIG_MEMORY_FAILURE
 /*
  * Support for hardware poisoned pages

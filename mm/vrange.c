@@ -8,6 +8,76 @@
 #include <linux/mm_inline.h>
 #include "internal.h"
 
+struct vrange_walker {
+	struct vm_area_struct *vma;
+	int page_was_purged;
+};
+
+
+/**
+ * vrange_check_purged_pte - Checks ptes for purged pages
+ *
+ * Iterates over the ptes in the pmd checking if they have
+ * purged swap entries.
+ *
+ * Sets the vrange_walker.pages_purged to 1 if any were purged.
+ */
+static int vrange_check_purged_pte(pmd_t *pmd, unsigned long addr,
+					unsigned long end, struct mm_walk *walk)
+{
+	struct vrange_walker *vw = walk->private;
+	pte_t *pte;
+	spinlock_t *ptl;
+
+	if (pmd_trans_huge(*pmd))
+		return 0;
+	if (pmd_trans_unstable(pmd))
+		return 0;
+
+	pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
+	for (; addr != end; pte++, addr += PAGE_SIZE) {
+		if (!pte_present(*pte)) {
+			swp_entry_t vrange_entry = pte_to_swp_entry(*pte);
+
+			if (unlikely(is_vpurged_entry(vrange_entry))) {
+				vw->page_was_purged = 1;
+				break;
+			}
+		}
+	}
+	pte_unmap_unlock(pte - 1, ptl);
+	cond_resched();
+
+	return 0;
+}
+
+
+/**
+ * vrange_check_purged - Sets up a mm_walk to check for purged pages
+ *
+ * Sets up and calls wa_page_range() to check for purge pages.
+ *
+ * Returns 1 if pages in the range were purged, 0 otherwise.
+ */
+static int vrange_check_purged(struct mm_struct *mm,
+					 struct vm_area_struct *vma,
+					 unsigned long start,
+					 unsigned long end)
+{
+	struct vrange_walker vw;
+	struct mm_walk vrange_walk = {
+		.pmd_entry = vrange_check_purged_pte,
+		.mm = vma->vm_mm,
+		.private = &vw,
+	};
+	vw.page_was_purged = 0;
+	vw.vma = vma;
+
+	walk_page_range(start, end, &vrange_walk);
+
+	return vw.page_was_purged;
+
+}
 
 /**
  * do_vrange - Marks or clears VMAs in the range (start-end) as VM_VOLATILE
@@ -106,6 +176,11 @@ success:
 		vma = prev->vm_next;
 	}
 out:
+	if (count && (mode == VRANGE_NONVOLATILE))
+		*purged = vrange_check_purged(mm, vma,
+						orig_start,
+						orig_start+count);
+
 	up_read(&mm->mmap_sem);
 
 	/* report bytes successfully marked, even if we're exiting on error */
