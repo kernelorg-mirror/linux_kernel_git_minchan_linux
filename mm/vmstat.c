@@ -742,6 +742,7 @@ const char * const vmstat_text[] = {
 	"nr_active_file",
 	"nr_unevictable",
 	"nr_mlock",
+	"nr_ezreclaimable",
 	"nr_anon_pages",
 	"nr_mapped",
 	"nr_file_pages",

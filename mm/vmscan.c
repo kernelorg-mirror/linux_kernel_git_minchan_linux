@@ -1112,6 +1112,8 @@ keep_locked:
 		unlock_page(page);
 keep:
 		list_add(&page->lru, &ret_pages);
+		if (PageAnon(page) && TestClearPageEZReclaim(page))
+			dec_zone_page_state(page, NR_EZRECLAIM_PAGES);
 		VM_BUG_ON_PAGE(PageLRU(page) || PageUnevictable(page), page);
 	}
 

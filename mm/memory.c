@@ -1299,6 +1299,8 @@ static unsigned long victim_pte_range(struct mmu_gather *tlb,
 		set_pte_at(mm, addr, pte, ptent);
 		tlb_remove_tlb_entry(tlb, pte, addr);
 		deactivate_page(page);
+		if (!TestSetPageEZReclaim(page))
+			inc_zone_page_state(page, NR_EZRECLAIM_PAGES);
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(start_pte, ptl);

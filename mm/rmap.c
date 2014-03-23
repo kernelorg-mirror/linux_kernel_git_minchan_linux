@@ -1099,6 +1099,8 @@ void page_remove_rmap(struct page *page)
 	}
 	if (unlikely(PageMlocked(page)))
 		clear_page_mlock(page);
+	if (anon && TestClearPageEZReclaim(page))
+		dec_zone_page_state(page, NR_EZRECLAIM_PAGES);
 	/*
 	 * It would be tidy to reset the PageAnon mapping here,
 	 * but that might overwrite a racing page_add_anon_rmap
