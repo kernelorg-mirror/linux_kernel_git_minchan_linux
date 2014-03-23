@@ -98,7 +98,7 @@ static ssize_t do_vrange(struct mm_struct *mm, unsigned long start,
 	unsigned long orig_start = start;
 	ssize_t count = 0, ret = 0;
 
-	down_read(&mm->mmap_sem);
+	down_write(&mm->mmap_sem);
 
 	vma = find_vma_prev(mm, start, &prev);
 	if (vma && start > vma->vm_start)
@@ -181,7 +181,7 @@ out:
 						orig_start,
 						orig_start+count);
 
-	up_read(&mm->mmap_sem);
+	up_write(&mm->mmap_sem);
 
 	/* report bytes successfully marked, even if we're exiting on error */
 	if (count)
