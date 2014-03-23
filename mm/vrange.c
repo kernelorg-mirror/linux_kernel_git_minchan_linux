@@ -28,6 +28,7 @@ static int vrange_check_purged_pte(pmd_t *pmd, unsigned long addr,
 	struct vrange_walker *vw = walk->private;
 	pte_t *pte;
 	spinlock_t *ptl;
+	int ret = 0;
 
 	if (pmd_trans_huge(*pmd))
 		return 0;
@@ -41,6 +42,8 @@ static int vrange_check_purged_pte(pmd_t *pmd, unsigned long addr,
 
 			if (unlikely(is_vpurged_entry(vrange_entry))) {
 				vw->page_was_purged = 1;
+				/* Stop page table walking */
+				ret = 1;
 				break;
 			}
 		}
@@ -48,7 +51,7 @@ static int vrange_check_purged_pte(pmd_t *pmd, unsigned long addr,
 	pte_unmap_unlock(pte - 1, ptl);
 	cond_resched();
 
-	return 0;
+	return ret;
 }
 
 
