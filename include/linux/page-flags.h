@@ -21,7 +21,8 @@
  *
  * The PG_private bitflag is set on pagecache pages if they contain filesystem
  * specific data (which is normally at page->private). It can be used by
- * private allocations for its own usage.
+ * private allocations for its own usage. For anonymous page, it could be set
+ * for indicating ezreclaimable page.
  *
  * During initiation of disk I/O, PG_locked is set. This bit is set before I/O
  * and cleared when writeback _starts_ or when read _completes_. PG_writeback
@@ -84,6 +85,7 @@ enum pageflags {
 	PG_arch_1,
 	PG_reserved,
 	PG_private,		/* If pagecache, has fs-private data */
+				/* If anon, it means ezreclaimable page */
 	PG_private_2,		/* If pagecache, has fs aux data */
 	PG_writeback,		/* Page is under writeback */
 #ifdef CONFIG_PAGEFLAGS_EXTENDED
@@ -113,6 +115,9 @@ enum pageflags {
 
 	/* Filesystems */
 	PG_checked = PG_owner_priv_1,
+
+	/* ezreclaimable */
+	PG_ezreclaim = PG_private,
 
 	/* Two page bits are conscripted by FS-Cache to maintain local caching
 	 * state.  These bits are set on pages belonging to the netfs's inodes
@@ -200,6 +205,8 @@ PAGEFLAG(Error, error) TESTCLEARFLAG(Error, error)
 PAGEFLAG(Referenced, referenced) TESTCLEARFLAG(Referenced, referenced)
 PAGEFLAG(Dirty, dirty) TESTSCFLAG(Dirty, dirty) __CLEARPAGEFLAG(Dirty, dirty)
 PAGEFLAG(LRU, lru) __CLEARPAGEFLAG(LRU, lru)
+PAGEFLAG(EZReclaim, ezreclaim) TESTSETFLAG(EZReclaim, ezreclaim)
+__CLEARPAGEFLAG(EZReclaim, ezreclaim) TESTCLEARFLAG(EZReclaim, ezreclaim)
 PAGEFLAG(Active, active) __CLEARPAGEFLAG(Active, active)
 	TESTCLEARFLAG(Active, active)
 __PAGEFLAG(Slab, slab)
