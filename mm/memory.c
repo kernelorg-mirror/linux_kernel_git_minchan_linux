@@ -3005,20 +3005,25 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned int flags, pte_t orig_pte)
 {
 	spinlock_t *ptl;
-	struct page *page, *swapcache;
+	struct page *uninitialized_var(page);
+	struct page *uninitialized_var(swapcache);
 	swp_entry_t entry;
 	pte_t pte;
 	int locked;
 	struct mem_cgroup *ptr;
 	int exclusive = 0;
 	int ret = 0;
+	int purge = 0;
 
 	if (!pte_unmap_same(mm, pmd, page_table, orig_pte))
 		goto out;
 
 	entry = pte_to_swp_entry(orig_pte);
 	if (unlikely(non_swap_entry(entry))) {
-		if (is_migration_entry(entry)) {
+		if (is_vpurged_entry(entry)) {
+			purge = 1;
+			goto investigate;
+		} else if (is_migration_entry(entry)) {
 			migration_entry_wait(mm, pmd, address);
 		} else if (is_hwpoison_entry(entry)) {
 			ret = VM_FAULT_HWPOISON;
@@ -3090,13 +3095,34 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto out_page;
 	}
 
+investigate:
 	/*
 	 * Back out if somebody else already faulted in this pte.
 	 */
 	page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
-	if (unlikely(!pte_same(*page_table, orig_pte)))
-		goto out_nomap;
+	if (unlikely(!pte_same(*page_table, orig_pte))) {
+		if (purge)
+			goto unlock;
+		else
+			goto out_nomap;
+	}
 
+	if (purge) {
+		if (vma->vm_flags & VM_VOLATILE) {
+			ret = VM_FAULT_SIGBUS;
+			goto unlock;
+		}
+		/* zap the purged pte */
+		flush_cache_page(vma, address, pte_pfn(orig_pte));
+		ptep_clear_flush(vma, address, &orig_pte);
+		/*
+		 * Just a retry will populate a new page by
+		 * do_anonymous_page.
+		 */
+		ret = VM_FAULT_RETRY;
+		up_read(&mm->mmap_sem);
+		goto unlock;
+	}
 	if (unlikely(!PageUptodate(page))) {
 		ret = VM_FAULT_SIGBUS;
 		goto out_nomap;
@@ -3644,8 +3670,6 @@ static int handle_pte_fault(struct mm_struct *mm,
 
 	entry = *pte;
 	if (!pte_present(entry)) {
-		swp_entry_t vrange_entry;
-retry:
 		if (pte_none(entry)) {
 			if (vma->vm_ops) {
 				if (likely(vma->vm_ops->fault))
@@ -3655,23 +3679,6 @@ retry:
 			return do_anonymous_page(mm, vma, address,
 						 pte, pmd, flags);
 		}
-
-		vrange_entry = pte_to_swp_entry(entry);
-		if (unlikely(is_vpurged_entry(vrange_entry))) {
-			if (vma->vm_flags & VM_VOLATILE)
-				return VM_FAULT_SIGBUS;
-
-			/* zap pte */
-			ptl = pte_lockptr(mm, pmd);
-			spin_lock(ptl);
-			if (unlikely(!pte_same(*pte, entry)))
-				goto unlock;
-			flush_cache_page(vma, address, pte_pfn(*pte));
-			ptep_clear_flush(vma, address, pte);
-			pte_unmap_unlock(pte, ptl);
-			goto retry;
-		}
-
 
 		if (pte_file(entry))
 			return do_nonlinear_fault(mm, vma, address,
