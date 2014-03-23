@@ -705,13 +705,6 @@ static enum page_references page_check_references(struct page *page,
 	if (vm_flags & VM_LOCKED)
 		return PAGEREF_RECLAIM;
 
-	/*
-	 * If volatile page is reached on LRU's tail, we discard the
-	 * page without considering recycle the page.
-	 */
-	if (vm_flags & VM_VOLATILE)
-		return PAGEREF_DISCARD;
-
 	if (referenced_ptes) {
 		if (PageSwapBacked(page))
 			return PAGEREF_ACTIVATE;
@@ -746,6 +739,9 @@ static enum page_references page_check_references(struct page *page,
 	/* Reclaim if clean, defer dirty pages to writeback */
 	if (referenced_page && !PageSwapBacked(page))
 		return PAGEREF_RECLAIM_CLEAN;
+	/* Discard the page instead of swap out */
+	if (vm_flags & VM_VOLATILE)
+		return PAGEREF_DISCARD;
 
 	return PAGEREF_RECLAIM;
 }

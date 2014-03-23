@@ -728,16 +728,14 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 				referenced++;
 		}
 		pte_unmap_unlock(pte, ptl);
-		if (vma->vm_flags & VM_VOLATILE) {
-			pra->mapcount = 0;
-			pra->vm_flags |= VM_VOLATILE;
-			return SWAP_FAIL;
-		}
 	}
 
 	if (referenced) {
 		pra->referenced++;
 		pra->vm_flags |= vma->vm_flags;
+	} else if (vma->vm_flags & VM_VOLATILE) {
+		/* Save VM_VOLATILE to discard a page instead of pageout */
+		pra->vm_flags |= VM_VOLATILE;
 	}
 
 	pra->mapcount--;
@@ -764,6 +762,8 @@ static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
  * @is_locked: caller holds lock on the page
  * @memcg: target memory cgroup
  * @vm_flags: collect encountered vma->vm_flags who actually referenced the page
+ *            but a exception that it could contain VM_VOLATILE if the page is
+ *            no referenced but one of VMAs has VM_VOLATILE
  *
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
