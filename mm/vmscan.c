@@ -158,6 +158,8 @@ static unsigned long zone_reclaimable_pages(struct zone *zone)
 	if (get_nr_swap_pages() > 0)
 		nr += zone_page_state(zone, NR_ACTIVE_ANON) +
 		      zone_page_state(zone, NR_INACTIVE_ANON);
+	else
+		nr += zone_page_state(zone, NR_EZRECLAIM_PAGES);
 
 	return nr;
 }
@@ -1762,11 +1764,13 @@ static int inactive_anon_is_low_global(struct zone *zone)
  */
 static int inactive_anon_is_low(struct lruvec *lruvec)
 {
+	struct zone *zone = lruvec_zone(lruvec);
 	/*
 	 * If we don't have swap space, anonymous page deactivation
 	 * is pointless.
 	 */
-	if (!total_swap_pages)
+	if (!total_swap_pages &&
+		(zone_page_state(zone, NR_EZRECLAIM_PAGES) <= 0))
 		return 0;
 
 	if (!mem_cgroup_disabled())
@@ -1879,7 +1883,8 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 		force_scan = true;
 
 	/* If we have no swap space, do not bother scanning anon pages. */
-	if (!sc->may_swap || (get_nr_swap_pages() <= 0)) {
+	if (!sc->may_swap || (get_nr_swap_pages() <= 0 &&
+		zone_page_state(zone, NR_EZRECLAIM_PAGES) <= 0)) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
@@ -2181,6 +2186,8 @@ static inline bool should_continue_reclaim(struct zone *zone,
 	inactive_lru_pages = zone_page_state(zone, NR_INACTIVE_FILE);
 	if (get_nr_swap_pages() > 0)
 		inactive_lru_pages += zone_page_state(zone, NR_INACTIVE_ANON);
+	else
+		inactive_lru_pages += zone_page_state(zone, NR_EZRECLAIM_PAGES);
 	if (sc->nr_reclaimed < pages_for_compaction &&
 			inactive_lru_pages > pages_for_compaction)
 		return true;
@@ -2724,7 +2731,8 @@ static void age_active_anon(struct zone *zone, struct scan_control *sc)
 {
 	struct mem_cgroup *memcg;
 
-	if (!total_swap_pages)
+	if (!total_swap_pages &&
+		(zone_page_state(zone, NR_EZRECLAIM_PAGES) <= 0))
 		return;
 
 	memcg = mem_cgroup_iter(NULL, NULL, NULL);
