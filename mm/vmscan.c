@@ -684,6 +684,7 @@ enum page_references {
 	PAGEREF_RECLAIM_CLEAN,
 	PAGEREF_KEEP,
 	PAGEREF_ACTIVATE,
+	PAGEREF_DISCARD,
 };
 
 static enum page_references page_check_references(struct page *page,
@@ -691,9 +692,12 @@ static enum page_references page_check_references(struct page *page,
 {
 	int referenced_ptes, referenced_page;
 	unsigned long vm_flags;
+	int is_pte_dirty;
+
+	VM_BUG_ON_PAGE(!PageLocked(page), page);
 
 	referenced_ptes = page_referenced(page, 1, sc->target_mem_cgroup,
-					  &vm_flags);
+					  &vm_flags, &is_pte_dirty);
 	referenced_page = TestClearPageReferenced(page);
 
 	/*
@@ -733,6 +737,18 @@ static enum page_references page_check_references(struct page *page,
 
 		return PAGEREF_KEEP;
 	}
+
+	/*
+	 * We should check PageDirty because swap-in page by read fault
+	 * will be swapcache and pte point out the page doesn't have
+	 * dirty bit so only pte dirtiness check isn't enough. In this case,
+	 * it would be good to check PG_swapcache to filter it out.
+	 * If the page is removed from swapcache, it must have PG_dirty
+	 * so we should check it to prevent purging non-lazyfree page.
+	 */
+	if (PageAnon(page) && !is_pte_dirty &&
+		!PageSwapCache(page) && !PageDirty(page))
+		return PAGEREF_DISCARD;
 
 	/* Reclaim if clean, defer dirty pages to writeback */
 	if (referenced_page && !PageSwapBacked(page))
@@ -932,6 +948,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			goto activate_locked;
 		case PAGEREF_KEEP:
 			goto keep_locked;
+		case PAGEREF_DISCARD:
+			goto discard;
 		case PAGEREF_RECLAIM:
 		case PAGEREF_RECLAIM_CLEAN:
 			; /* try to reclaim the page below */
@@ -957,6 +975,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * processes. Try to unmap it here.
 		 */
 		if (page_mapped(page) && mapping) {
+discard:
 			switch (try_to_unmap(page, ttu_flags)) {
 			case SWAP_FAIL:
 				goto activate_locked;
@@ -964,6 +983,13 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				goto keep_locked;
 			case SWAP_MLOCK:
 				goto cull_mlocked;
+			case SWAP_DISCARD:
+				VM_BUG_ON_PAGE(PageSwapCache(page), page);
+				if (!page_freeze_refs(page, 1))
+					goto keep_locked;
+				__clear_page_locked(page);
+				count_vm_event(PGLAZYFREED);
+				goto free_it;
 			case SWAP_SUCCESS:
 				; /* try to free the page below */
 			}
@@ -1688,7 +1714,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		}
 
 		if (page_referenced(page, 0, sc->target_mem_cgroup,
-				    &vm_flags)) {
+				    &vm_flags, NULL)) {
 			nr_rotated += hpage_nr_pages(page);
 			/*
 			 * Identify referenced, file-backed active pages and
