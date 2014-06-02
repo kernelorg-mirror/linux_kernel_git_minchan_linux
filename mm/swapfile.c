@@ -860,20 +860,25 @@ void swap_free(swp_entry_t entry)
 	}
 }
 
+void __swapcache_free(struct swap_info_struct *p,
+		swp_entry_t entry, struct page *page)
+{
+	unsigned char count;
+	count = swap_entry_free(p, entry, SWAP_HAS_CACHE);
+	mem_cgroup_uncharge_swapcache(page, entry, count != 0);
+}
+
 /*
  * Called after dropping swapcache to decrease refcnt to swap entries.
  */
 void swapcache_free(swp_entry_t entry, struct page *page)
 {
 	struct swap_info_struct *p;
-	unsigned char count;
 
 	p = swap_info_get(entry);
 	if (p) {
 		spin_lock(&p->lock);
-		count = swap_entry_free(p, entry, SWAP_HAS_CACHE);
-		if (page)
-			mem_cgroup_uncharge_swapcache(page, entry, count != 0);
+		__swapcache_free(p, entry, page);
 		spin_unlock(&p->lock);
 	}
 }
