@@ -522,14 +522,13 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 /*
  * Same as remove_mapping, but if the page is removed from the mapping, it
  * gets returned with a refcount of 0.
+ * Caller should held a mapping->tree_lock.
  */
-static int __remove_mapping(struct address_space *mapping, struct page *page,
-			    bool reclaimed)
+static int __remove_mapping(struct address_space *mapping, struct page *page)
 {
 	BUG_ON(!PageLocked(page));
 	BUG_ON(mapping != page_mapping(page));
-
-	spin_lock_irq(&mapping->tree_lock);
+	assert_spin_locked(&mapping->tree_lock);
 	/*
 	 * The non racy check for a busy page.
 	 *
@@ -563,41 +562,9 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 		goto cannot_free;
 	}
 
-	if (PageSwapCache(page)) {
-		swp_entry_t swap = { .val = page_private(page) };
-		__delete_from_swap_cache(page);
-		spin_unlock_irq(&mapping->tree_lock);
-		swapcache_free(swap, page);
-	} else {
-		void (*freepage)(struct page *);
-		void *shadow = NULL;
-
-		freepage = mapping->a_ops->freepage;
-		/*
-		 * Remember a shadow entry for reclaimed file cache in
-		 * order to detect refaults, thus thrashing, later on.
-		 *
-		 * But don't store shadows in an address space that is
-		 * already exiting.  This is not just an optizimation,
-		 * inode reclaim needs to empty out the radix tree or
-		 * the nodes are lost.  Don't plant shadows behind its
-		 * back.
-		 */
-		if (reclaimed && page_is_file_cache(page) &&
-		    !mapping_exiting(mapping))
-			shadow = workingset_eviction(mapping, page);
-		__delete_from_page_cache(page, shadow);
-		spin_unlock_irq(&mapping->tree_lock);
-		mem_cgroup_uncharge_cache_page(page);
-
-		if (freepage != NULL)
-			freepage(page);
-	}
-
 	return 1;
 
 cannot_free:
-	spin_unlock_irq(&mapping->tree_lock);
 	return 0;
 }
 
@@ -609,16 +576,37 @@ cannot_free:
  */
 int remove_mapping(struct address_space *mapping, struct page *page)
 {
-	if (__remove_mapping(mapping, page, false)) {
+	int ret = 0;
+	spin_lock_irq(&mapping->tree_lock);
+	if (__remove_mapping(mapping, page)) {
+		if (PageSwapCache(page)) {
+			swp_entry_t swap = { .val = page_private(page) };
+			__delete_from_swap_cache(page);
+			spin_unlock_irq(&mapping->tree_lock);
+			swapcache_free(swap, page);
+		} else {
+			void (*freepage)(struct page *);
+
+			freepage = mapping->a_ops->freepage;
+			__delete_from_page_cache(page, NULL);
+			spin_unlock_irq(&mapping->tree_lock);
+			mem_cgroup_uncharge_cache_page(page);
+
+			if (freepage != NULL)
+				freepage(page);
+		}
 		/*
 		 * Unfreezing the refcount with 1 rather than 2 effectively
 		 * drops the pagecache ref for us without requiring another
 		 * atomic operation.
 		 */
 		page_unfreeze_refs(page, 1);
-		return 1;
+		ret = 1;
+		goto out;
 	}
-	return 0;
+	spin_unlock_irq(&mapping->tree_lock);
+out:
+	return ret;
 }
 
 /**
@@ -1079,8 +1067,47 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			}
 		}
 
-		if (!mapping || !__remove_mapping(mapping, page, true))
+		if (!mapping)
 			goto keep_locked;
+
+		spin_lock_irq(&mapping->tree_lock);
+		if (__remove_mapping(mapping, page)) {
+			if (PageSwapCache(page)) {
+				swp_entry_t swap =
+					{ .val = page_private(page) };
+				__delete_from_swap_cache(page);
+				spin_unlock_irq(&mapping->tree_lock);
+				swapcache_free(swap, page);
+			} else {
+				void (*freepage)(struct page *);
+				void *shadow = NULL;
+
+				freepage = mapping->a_ops->freepage;
+				/*
+				 * Remember a shadow entry for reclaimed
+				 * file cache in order to detect refaults,
+				 * thus thrashing, later on.
+				 *
+				 * But don't store shadows in an address space
+				 * that is already exiting.  This is not just
+				 * an optizimation, inode reclaim needs to
+				 * empty out the radix tree or the nodes are
+				 * lost.  Don't plant shadows behind its back.
+				 */
+				if (page_is_file_cache(page) &&
+				    !mapping_exiting(mapping))
+					shadow = workingset_eviction(mapping, page);
+				__delete_from_page_cache(page, shadow);
+				spin_unlock_irq(&mapping->tree_lock);
+				mem_cgroup_uncharge_cache_page(page);
+
+				if (freepage != NULL)
+					freepage(page);
+			}
+		} else {
+			spin_unlock_irq(&mapping->tree_lock);
+			goto keep_locked;
+		}
 
 		/*
 		 * At this point, we have no other references and there is
