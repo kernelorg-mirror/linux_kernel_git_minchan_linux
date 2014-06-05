@@ -60,8 +60,6 @@
  *	page->freelist: points to the first free object in zspage.
  *		Free objects are linked together using in-place
  *		metadata.
- *	page->objects: maximum number of objects we can store in this
- *		zspage (class->zspage_order * PAGE_SIZE / class->size)
  *	page->lru: links together first pages of various zspages.
  *		Basically forming list of zspages in a fullness group.
  *	page->mapping: class index and fullness group of the zspage
@@ -301,14 +299,15 @@ static int get_size_class_index(int size)
  * the pool (not yet implemented). This function returns fullness
  * status of the given page.
  */
-static enum fullness_group get_fullness_group(struct page *page)
+static enum fullness_group get_fullness_group(struct page *page,
+					struct size_class *class)
 {
 	int inuse, max_objects;
 	enum fullness_group fg;
 	BUG_ON(!is_first_page(page));
 
 	inuse = page->inuse;
-	max_objects = page->objects;
+	max_objects = class->pages_per_zspage * PAGE_SIZE / class->size;
 
 	if (inuse == 0)
 		fg = ZS_EMPTY;
@@ -389,11 +388,11 @@ static enum fullness_group fix_fullness_group(struct zs_pool *pool,
 	BUG_ON(!is_first_page(page));
 
 	get_zspage_mapping(page, &class_idx, &currfg);
-	newfg = get_fullness_group(page);
+	class = &pool->size_class[class_idx];
+	newfg = get_fullness_group(page, class);
 	if (newfg == currfg)
 		goto out;
 
-	class = &pool->size_class[class_idx];
 	remove_zspage(page, class, currfg);
 	insert_zspage(page, class, newfg);
 	set_zspage_mapping(page, class_idx, newfg);
@@ -635,9 +634,6 @@ static struct page *alloc_zspage(struct size_class *class, gfp_t flags)
 	init_zspage(first_page, class->size);
 
 	first_page->freelist = obj_location_to_handle(first_page, 0);
-	/* Maximum number of objects we can store in this zspage */
-	first_page->objects = class->pages_per_zspage * PAGE_SIZE / class->size;
-
 	error = 0; /* Success */
 
 cleanup:
