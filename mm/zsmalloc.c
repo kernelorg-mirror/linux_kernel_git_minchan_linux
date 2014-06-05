@@ -212,7 +212,7 @@ struct size_class {
  */
 struct link_free {
 	/* Handle of next free chunk (encodes <PFN, obj_idx>) */
-	void *next;
+	unsigned long next;
 };
 
 struct zs_pool {
@@ -471,19 +471,20 @@ static struct page *get_next_page(struct page *page)
  * could be 0 so we ensure that the handle will never be 0 by adjusting the
  * encoded obj_idx value before encoding.
  */
-static void *obj_location_to_handle(struct page *page, unsigned long obj_idx)
+static unsigned long obj_location_to_handle(struct page *page,
+					unsigned long obj_idx)
 {
 	unsigned long handle;
 
 	if (!page) {
 		BUG_ON(obj_idx);
-		return NULL;
+		return 0;
 	}
 
 	handle = page_to_pfn(page) << OBJ_INDEX_BITS;
 	handle |= ((obj_idx + 1) & OBJ_INDEX_MASK);
 
-	return (void *)handle;
+	return handle;
 }
 
 /*
@@ -635,7 +636,7 @@ static struct page *alloc_zspage(struct size_class *class, gfp_t flags)
 
 	init_zspage(first_page, class->size);
 
-	first_page->freelist = obj_location_to_handle(first_page, 0);
+	first_page->freelist = (void *)obj_location_to_handle(first_page, 0);
 	error = 0; /* Success */
 
 cleanup:
@@ -953,7 +954,7 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size)
 
 	link = (struct link_free *)kmap_atomic(m_page) +
 					m_offset / sizeof(*link);
-	first_page->freelist = link->next;
+	first_page->freelist = (void *)link->next;
 	memset(link, POISON_INUSE, sizeof(*link));
 	kunmap_atomic(link);
 
@@ -991,7 +992,7 @@ void zs_free(struct zs_pool *pool, unsigned long obj)
 	/* Insert this object in containing zspage's freelist */
 	link = (struct link_free *)((unsigned char *)kmap_atomic(f_page)
 							+ f_offset);
-	link->next = first_page->freelist;
+	link->next = (unsigned long)first_page->freelist;
 	kunmap_atomic(link);
 	first_page->freelist = (void *)obj;
 
