@@ -955,7 +955,6 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size)
 	link = (struct link_free *)kmap_atomic(m_page) +
 					m_offset / sizeof(*link);
 	first_page->freelist = (void *)link->next;
-	memset(link, POISON_INUSE, sizeof(*link));
 	kunmap_atomic(link);
 
 	first_page->inuse++;
