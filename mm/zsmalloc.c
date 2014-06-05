@@ -96,15 +96,17 @@
  * These two conditions ensure that any 'struct link_free' itself doesn't
  * span more than 1 page which avoids complex case of mapping 2 pages simply
  * to restore link_free pointer values.
+ * In this implemenation, struct link_free has a (void *)next so ZS_ALIGN is
+ * equal to BITS_PER_LONG.
  */
-#define ZS_ALIGN		8
+#define ZS_ALIGN	BITS_PER_LONG
 
 /*
  * A single 'zspage' is composed of up to 2^N discontiguous 0-order (single)
  * pages. ZS_MAX_ZSPAGE_ORDER defines upper limit on N.
  */
 #define ZS_MAX_ZSPAGE_ORDER 2
-#define ZS_MAX_PAGES_PER_ZSPAGE (_AC(1, UL) << ZS_MAX_ZSPAGE_ORDER)
+#define ZS_MAX_PAGES_PER_ZSPAGE (1UL << ZS_MAX_ZSPAGE_ORDER)
 
 /*
  * Object location (<PFN>, <obj_idx>) is encoded as
@@ -130,12 +132,11 @@
 #endif
 #define _PFN_BITS		(MAX_PHYSMEM_BITS - PAGE_SHIFT)
 #define OBJ_INDEX_BITS	(BITS_PER_LONG - _PFN_BITS)
-#define OBJ_INDEX_MASK	((_AC(1, UL) << OBJ_INDEX_BITS) - 1)
+#define OBJ_INDEX_MASK	((1UL << OBJ_INDEX_BITS) - 1)
 
 #define MAX(a, b) ((a) >= (b) ? (a) : (b))
 /* ZS_MIN_ALLOC_SIZE must be multiple of ZS_ALIGN */
-#define ZS_MIN_ALLOC_SIZE \
-	MAX(32, (ZS_MAX_PAGES_PER_ZSPAGE << PAGE_SHIFT >> OBJ_INDEX_BITS))
+#define ZS_MIN_ALLOC_SIZE	MAX(32, (PAGE_SIZE >> OBJ_INDEX_BITS))
 #define ZS_MAX_ALLOC_SIZE	PAGE_SIZE
 
 /*
@@ -207,6 +208,7 @@ struct size_class {
  * For every zspage, first_page->freelist gives head of this list.
  *
  * This must be power of 2 and less than or equal to ZS_ALIGN
+ * If you change size of this struct, you should consider ZS_ALIGN, too.
  */
 struct link_free {
 	/* Handle of next free chunk (encodes <PFN, obj_idx>) */
@@ -820,6 +822,10 @@ static void zs_exit(void)
 static int zs_init(void)
 {
 	int cpu, ret;
+
+	BUILD_BUG_ON(!is_power_of_2(ZS_ALIGN) ||
+			(ZS_ALIGN < sizeof(struct link_free)));
+	BUILD_BUG_ON(ZS_MIN_ALLOC_SIZE / ZS_ALIGN);
 
 	cpu_notifier_register_begin();
 
