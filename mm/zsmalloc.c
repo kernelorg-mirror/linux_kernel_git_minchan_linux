@@ -619,9 +619,7 @@ static struct page *alloc_zspage(struct size_class *class, gfp_t flags)
 		INIT_LIST_HEAD(&page->lru);
 		if (i == 0) {	/* first page */
 			SetPagePrivate(page);
-			set_page_private(page, 0);
 			first_page = page;
-			first_page->inuse = 0;
 		}
 		if (i == 1)
 			set_page_private(first_page, (unsigned long)page);
