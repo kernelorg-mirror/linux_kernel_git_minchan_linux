@@ -544,7 +544,7 @@ static void free_zspage(struct page *first_page)
 }
 
 /* Initialize a newly allocated zspage */
-static void init_zspage(struct page *first_page, struct size_class *class)
+static void init_zspage(struct page *first_page, int csize)
 {
 	unsigned long off = 0;
 	struct page *page = first_page;
@@ -566,13 +566,13 @@ static void init_zspage(struct page *first_page, struct size_class *class)
 
 		link = (struct link_free *)kmap_atomic(page) +
 						off / sizeof(*link);
-		objs_on_page = (PAGE_SIZE - off) / class->size;
+		objs_on_page = (PAGE_SIZE - off) / csize;
 
 		for (i = 1; i <= objs_on_page; i++) {
-			off += class->size;
+			off += csize;
 			if (off < PAGE_SIZE) {
 				link->next = obj_location_to_handle(page, i);
-				link += class->size / sizeof(*link);
+				link += csize / sizeof(*link);
 			}
 		}
 
@@ -585,7 +585,7 @@ static void init_zspage(struct page *first_page, struct size_class *class)
 		link->next = obj_location_to_handle(next_page, 0);
 		kunmap_atomic(link);
 		page = next_page;
-		off = (off + class->size) % PAGE_SIZE;
+		off = (off + csize) % PAGE_SIZE;
 	}
 }
 
@@ -632,7 +632,7 @@ static struct page *alloc_zspage(struct size_class *class, gfp_t flags)
 		prev_page = page;
 	}
 
-	init_zspage(first_page, class);
+	init_zspage(first_page, class->size);
 
 	first_page->freelist = obj_location_to_handle(first_page, 0);
 	/* Maximum number of objects we can store in this zspage */
