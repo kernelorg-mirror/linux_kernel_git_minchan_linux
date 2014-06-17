@@ -722,7 +722,7 @@ swp_entry_t get_swap_page_of_type(int type)
 	return (swp_entry_t) {0};
 }
 
-static struct swap_info_struct *swap_info_get(swp_entry_t entry)
+struct swap_info_struct *swap_info_get(swp_entry_t entry)
 {
 	struct swap_info_struct *p;
 	unsigned long offset, type;
@@ -853,6 +853,15 @@ void swapcache_free(swp_entry_t entry)
 		swap_entry_free(p, entry, SWAP_HAS_CACHE);
 		spin_unlock(&p->lock);
 	}
+}
+
+void __swapcache_free(swp_entry_t entry)
+{
+	struct swap_info_struct *p;
+
+	p = swap_info_get(entry);
+	if (p)
+		swap_entry_free(p, entry, SWAP_HAS_CACHE);
 }
 
 /*
