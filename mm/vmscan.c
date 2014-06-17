@@ -526,6 +526,69 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 }
 
 /*
+ * Attempt to detach a locked page from its ->mapping in atomic context.
+ * If it is dirty or if someone else has a ref on the page or couldn't
+ * get necessary locks, abort and return 0.
+ * If it was successfully detached, return 1.
+ * Assumes the caller has a single ref on this page.
+ */
+int atomic_remove_mapping(struct address_space *mapping,
+				struct page *page)
+{
+	BUG_ON(!PageLocked(page));
+	BUG_ON(mapping != page_mapping(page));
+	BUG_ON(!irqs_disabled());
+
+	spin_lock(&mapping->tree_lock);
+
+	/* Look at comment in __remove_mapping */
+	if (!page_freeze_refs(page, 2))
+		goto cannot_free;
+	/* note: atomic_cmpxchg in page_freeze_refs provides the smp_rmb */
+	if (unlikely(PageDirty(page))) {
+		page_unfreeze_refs(page, 2);
+		goto cannot_free;
+	}
+
+	if (PageSwapCache(page)) {
+		swp_entry_t swap = { .val = page_private(page) };
+		struct swap_info_struct *p = swap_info_get(swap);
+
+		if (!p || !spin_trylock(&p->lock)) {
+			page_unfreeze_refs(page, 2);
+			goto cannot_free;
+		}
+
+		mem_cgroup_swapout(page, swap);
+		__delete_from_swap_cache(page);
+		spin_unlock(&mapping->tree_lock);
+		__swapcache_free(swap);
+		spin_unlock(&p->lock);
+	} else {
+		void (*freepage)(struct page *);
+
+		freepage = mapping->a_ops->freepage;
+		__delete_from_page_cache(page, NULL);
+		spin_unlock(&mapping->tree_lock);
+
+		if (freepage != NULL)
+			freepage(page);
+	}
+
+	/*
+	 * Unfreezing the refcount with 1 rather than 2 effectively
+	 * drops the pagecache ref for us without requiring another
+	 * atomic operation.
+	 */
+	page_unfreeze_refs(page, 1);
+	return 1;
+
+cannot_free:
+	spin_unlock(&mapping->tree_lock);
+	return 0;
+}
+
+/*
  * Same as remove_mapping, but if the page is removed from the mapping, it
  * gets returned with a refcount of 0.
  */
