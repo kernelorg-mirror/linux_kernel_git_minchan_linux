@@ -443,6 +443,27 @@ static void pagevec_move_tail_fn(struct page *page, struct lruvec *lruvec,
 
 	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
 		enum lru_list lru = page_lru_base_type(page);
+		struct address_space *mapping;
+
+		if (!trylock_page(page))
+			goto move_tail;
+
+		mapping = page_mapping(page);
+		if (!mapping)
+			goto unlock;
+
+		/*
+		 * If it is successful, aotmic_remove_mapping
+		 * makes page->count one so the page will be
+		 * released when caller release his refcount.
+		 */
+		if (atomic_remove_mapping(mapping, page)) {
+			unlock_page(page);
+			return;
+		}
+unlock:
+		unlock_page(page);
+move_tail:
 		list_move_tail(&page->lru, &lruvec->lists[lru]);
 		(*pgmoved)++;
 	}

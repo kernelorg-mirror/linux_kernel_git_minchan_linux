@@ -752,23 +752,28 @@ EXPORT_SYMBOL(unlock_page);
  */
 void end_page_writeback(struct page *page)
 {
+	if (!test_clear_page_writeback(page))
+		BUG();
+
+	smp_mb__after_atomic();
+	wake_up_page(page, PG_writeback);
+
 	/*
 	 * TestClearPageReclaim could be used here but it is an atomic
 	 * operation and overkill in this particular case. Failing to
 	 * shuffle a page marked for immediate reclaim is too mild to
 	 * justify taking an atomic operation penalty at the end of
 	 * ever page writeback.
+	 *
+	 * Clearing PG_reclaim after waking up waiter is slightly racy.
+	 * Readahead might see PageReclaim as PageReadahead marker
+	 * so readahead logic might be broken temporally but it isn't
+	 * matter enough to care.
 	 */
 	if (PageReclaim(page)) {
 		ClearPageReclaim(page);
 		rotate_reclaimable_page(page);
 	}
-
-	if (!test_clear_page_writeback(page))
-		BUG();
-
-	smp_mb__after_atomic();
-	wake_up_page(page, PG_writeback);
 }
 EXPORT_SYMBOL(end_page_writeback);
 
