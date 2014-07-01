@@ -198,9 +198,6 @@ struct size_class {
 
 	spinlock_t lock;
 
-	/* stats */
-	u64 pages_allocated;
-
 	struct page *fullness_list[_ZS_NR_FULLNESS_GROUPS];
 };
 
@@ -216,9 +213,12 @@ struct link_free {
 };
 
 struct zs_pool {
+	spinlock_t stat_lock;
+
 	struct size_class size_class[ZS_SIZE_CLASSES];
 
 	gfp_t flags;	/* allocation flags used when growing pool */
+	unsigned long pages_allocated;
 };
 
 /*
@@ -882,6 +882,7 @@ struct zs_pool *zs_create_pool(gfp_t flags)
 
 	}
 
+	spin_lock_init(&pool->stat_lock);
 	pool->flags = flags;
 
 	return pool;
@@ -943,8 +944,10 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size)
 			return 0;
 
 		set_zspage_mapping(first_page, class->index, ZS_EMPTY);
+		spin_lock(&pool->stat_lock);
+		pool->pages_allocated += class->pages_per_zspage;
+		spin_unlock(&pool->stat_lock);
 		spin_lock(&class->lock);
-		class->pages_allocated += class->pages_per_zspage;
 	}
 
 	obj = (unsigned long)first_page->freelist;
@@ -997,14 +1000,14 @@ void zs_free(struct zs_pool *pool, unsigned long obj)
 
 	first_page->inuse--;
 	fullness = fix_fullness_group(pool, first_page);
-
-	if (fullness == ZS_EMPTY)
-		class->pages_allocated -= class->pages_per_zspage;
-
 	spin_unlock(&class->lock);
 
-	if (fullness == ZS_EMPTY)
+	if (fullness == ZS_EMPTY) {
+		spin_lock(&pool->stat_lock);
+		pool->pages_allocated -= class->pages_per_zspage;
+		spin_unlock(&pool->stat_lock);
 		free_zspage(first_page);
+	}
 }
 EXPORT_SYMBOL_GPL(zs_free);
 
@@ -1100,12 +1103,11 @@ EXPORT_SYMBOL_GPL(zs_unmap_object);
 
 u64 zs_get_total_size_bytes(struct zs_pool *pool)
 {
-	int i;
-	u64 npages = 0;
+	u64 npages;
 
-	for (i = 0; i < ZS_SIZE_CLASSES; i++)
-		npages += pool->size_class[i].pages_allocated;
-
+	spin_lock(&pool->stat_lock);
+	npages = pool->pages_allocated;
+	spin_unlock(&pool->stat_lock);
 	return npages << PAGE_SHIFT;
 }
 EXPORT_SYMBOL_GPL(zs_get_total_size_bytes);
