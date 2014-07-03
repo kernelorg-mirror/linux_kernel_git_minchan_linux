@@ -1384,6 +1384,33 @@ out:
 	return 0;
 }
 
+int madvise_free_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
+		 pmd_t *pmd, unsigned long addr)
+{
+	spinlock_t *ptl;
+	int ret = 0;
+
+	if (__pmd_trans_huge_lock(pmd, vma, &ptl) == 1) {
+		pmd_t orig_pmd;
+		struct mm_struct *mm = vma->vm_mm;
+		struct page *page = pmd_page(orig_pmd);
+
+		/* XXX: build test with no VM_BUG_ON */
+		/* No hugepage in swapcache */
+		VM_BUG_ON_PAGE(PageSwapCache(page), page);
+
+		orig_pmd = pmdp_get_and_clear(tlb->mm, addr, pmd);
+		orig_pmd = pmd_mkold(orig_pmd);
+		orig_pmd = pmd_mkclean(orig_pmd);
+
+		set_pmd_at(mm, addr, pmd, orig_pmd);
+		tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
+		spin_unlock(ptl);
+		ret = 1;
+	}
+	return ret;
+}
+
 int zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		 pmd_t *pmd, unsigned long addr)
 {

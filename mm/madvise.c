@@ -320,8 +320,23 @@ static inline unsigned long madvise_free_pmd_range(struct mmu_gather *tlb,
 		 * if the range covers.
 		 */
 		next = pmd_addr_end(addr, end);
-		if (pmd_trans_huge(*pmd))
-			split_huge_page_pmd(vma, addr, pmd);
+		if (pmd_trans_huge(*pmd)) {
+			if (next - addr != HPAGE_PMD_SIZE) {
+#ifdef CONFIG_DEBUG_VM
+				if (!rwsem_is_locked(&tlb->mm->mmap_sem)) {
+					pr_err("%s: mmap_sem is unlocked! addr=0x%lx end=0x%lx vma->vm_start=0x%lx vma->vm_end=0x%lx\n",
+						__func__, addr, end,
+						vma->vm_start,
+						vma->vm_end);
+					BUG();
+				}
+#endif
+				split_huge_page_pmd(vma, addr, pmd);
+			} else if (madvise_free_pmd(tlb, vma, pmd, addr))
+				goto next;
+			/* fall through */
+		}
+
 		/*
 		 * Here there can be other concurrent MADV_DONTNEED or
 		 * trans huge page faults running, and if the pmd is
