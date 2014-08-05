@@ -219,6 +219,7 @@ struct zs_pool {
 
 	gfp_t flags;	/* allocation flags used when growing pool */
 	unsigned long pages_allocated;
+	unsigned long max_pages_allocated;
 };
 
 /*
@@ -946,6 +947,8 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size)
 		set_zspage_mapping(first_page, class->index, ZS_EMPTY);
 		spin_lock(&pool->stat_lock);
 		pool->pages_allocated += class->pages_per_zspage;
+		if (pool->max_pages_allocated < pool->pages_allocated)
+			pool->max_pages_allocated = pool->pages_allocated;
 		spin_unlock(&pool->stat_lock);
 		spin_lock(&class->lock);
 	}
@@ -1101,6 +1104,9 @@ void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
 }
 EXPORT_SYMBOL_GPL(zs_unmap_object);
 
+/*
+ * Reports current memory usage consumed by zs_malloc
+ */
 u64 zs_get_total_size_bytes(struct zs_pool *pool)
 {
 	u64 npages;
@@ -1111,6 +1117,20 @@ u64 zs_get_total_size_bytes(struct zs_pool *pool)
 	return npages << PAGE_SHIFT;
 }
 EXPORT_SYMBOL_GPL(zs_get_total_size_bytes);
+
+/*
+ * Reports maximum memory usage zs_malloc have consumed
+ */
+u64 zs_get_max_size_bytes(struct zs_pool *pool)
+{
+	u64 npages;
+
+	spin_lock(&pool->stat_lock);
+	npages = pool->max_pages_allocated;
+	spin_unlock(&pool->stat_lock);
+	return npages << PAGE_SHIFT;
+}
+EXPORT_SYMBOL_GPL(zs_get_max_size_bytes);
 
 module_init(zs_init);
 module_exit(zs_exit);
