@@ -220,6 +220,7 @@ struct zs_pool {
 	gfp_t flags;	/* allocation flags used when growing pool */
 	unsigned long pages_allocated;
 	unsigned long max_pages_allocated;
+	unsigned long pages_limited;
 };
 
 /*
@@ -940,6 +941,11 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size)
 
 	if (!first_page) {
 		spin_unlock(&class->lock);
+
+		if (pool->pages_limited && (pool->pages_limited <
+			pool->pages_allocated + class->pages_per_zspage))
+			return 0;
+
 		first_page = alloc_zspage(class, pool->flags);
 		if (unlikely(!first_page))
 			return 0;
@@ -1131,6 +1137,24 @@ u64 zs_get_max_size_bytes(struct zs_pool *pool)
 	return npages << PAGE_SHIFT;
 }
 EXPORT_SYMBOL_GPL(zs_get_max_size_bytes);
+
+void zs_set_limit_size_bytes(struct zs_pool *pool, u64 limit)
+{
+	pool->pages_limited = round_down(limit, PAGE_SIZE) >> PAGE_SHIFT;
+}
+EXPORT_SYMBOL_GPL(zs_set_limit_size_bytes);
+
+u64 zs_get_limit_size_bytes(struct zs_pool *pool)
+{
+	u64 npages;
+
+	spin_lock(&pool->stat_lock);
+	npages = pool->pages_limited;
+	spin_unlock(&pool->stat_lock);
+	return npages << PAGE_SHIFT;
+
+}
+EXPORT_SYMBOL_GPL(zs_get_limit_size_bytes);
 
 module_init(zs_init);
 module_exit(zs_exit);

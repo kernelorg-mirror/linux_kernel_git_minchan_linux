@@ -96,6 +96,7 @@ size of the disk when not in use so a huge zram is wasteful.
 		compr_data_size
 		mem_used_total
 		mem_used_max
+		mem_limit
 
 7) Deactivate:
 	swapoff /dev/zram0
