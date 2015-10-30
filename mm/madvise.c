@@ -317,6 +317,9 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 			unlock_page(page);
 		}
 
+		if (PageActive(page))
+			deactivate_page(page);
+
 		if (pte_young(ptent) || pte_dirty(ptent)) {
 			/*
 			 * Some of architecture(ex, PPC) don't update TLB
