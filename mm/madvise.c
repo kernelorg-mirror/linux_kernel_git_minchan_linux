@@ -271,8 +271,17 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 	pte_t *pte, ptent;
 	struct page *page;
 	int nr_swap = 0;
+	unsigned long next;
 
-	split_huge_page_pmd(vma, addr, pmd);
+	next = pmd_addr_end(addr, end);
+	if (pmd_trans_huge(*pmd)) {
+		if (next - addr != HPAGE_PMD_SIZE)
+			split_huge_page_pmd(vma, addr, pmd);
+		else if (!madvise_free_huge_pmd(tlb, vma, pmd, addr))
+			goto next;
+		/* fall through */
+	}
+
 	if (pmd_trans_unstable(pmd))
 		return 0;
 
@@ -355,6 +364,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(pte - 1, ptl);
 	cond_resched();
+next:
 	return 0;
 }
 
