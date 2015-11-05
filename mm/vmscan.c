@@ -194,16 +194,23 @@ static bool sane_reclaim(struct scan_control *sc)
 
 static unsigned long zone_reclaimable_pages(struct zone *zone)
 {
-	int nr;
+	unsigned long file, anon;
 
-	nr = zone_page_state(zone, NR_ACTIVE_FILE) +
-	     zone_page_state(zone, NR_INACTIVE_FILE);
+	file = zone_page_state(zone, NR_ACTIVE_FILE) +
+		zone_page_state(zone, NR_INACTIVE_FILE);
 
-	if (get_nr_swap_pages() > 0)
-		nr += zone_page_state(zone, NR_ACTIVE_ANON) +
-		      zone_page_state(zone, NR_INACTIVE_ANON);
+	/*
+	 * Although there is no swap space, we should consider
+	 * lazy free pages in inactive anon LRU list.
+	 */
+	if (total_swap_pages > 0) {
+		anon = zone_page_state(zone, NR_ACTIVE_ANON) +
+			zone_page_state(zone, NR_INACTIVE_ANON);
+	} else {
+		anon = zone_page_state(zone, NR_INACTIVE_ANON);
+	}
 
-	return nr;
+	return file + anon;
 }
 
 bool zone_reclaimable(struct zone *zone)
@@ -605,18 +612,23 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 /*
  * Same as remove_mapping, but if the page is removed from the mapping, it
  * gets returned with a refcount of 0.
+ *
+ * In !CONFIG_SWAP, @page could be lazy-free one. In such case, it doesn't
+ * have any backing store so @mapping is NULL.
  */
 static int __remove_mapping(struct address_space *mapping, struct page *page,
 			    bool reclaimed)
 {
 	unsigned long flags;
 	struct mem_cgroup *memcg;
+	int freeze_cnt = mapping ? 2 : 1;
 
 	BUG_ON(!PageLocked(page));
 	BUG_ON(mapping != page_mapping(page));
 
 	memcg = mem_cgroup_begin_page_stat(page);
-	spin_lock_irqsave(&mapping->tree_lock, flags);
+	if (mapping)
+		spin_lock_irqsave(&mapping->tree_lock, flags);
 	/*
 	 * The non racy check for a busy page.
 	 *
@@ -642,13 +654,16 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 	 * Note that if SetPageDirty is always performed via set_page_dirty,
 	 * and thus under tree_lock, then this ordering is not required.
 	 */
-	if (!page_freeze_refs(page, 2))
+	if (!page_freeze_refs(page, freeze_cnt))
 		goto cannot_free;
 	/* note: atomic_cmpxchg in page_freeze_refs provides the smp_rmb */
 	if (unlikely(PageDirty(page))) {
-		page_unfreeze_refs(page, 2);
+		page_unfreeze_refs(page, freeze_cnt);
 		goto cannot_free;
 	}
+
+	if (!mapping)
+		return 1;
 
 	if (PageSwapCache(page)) {
 		swp_entry_t swap = { .val = page_private(page) };
@@ -686,7 +701,8 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 	return 1;
 
 cannot_free:
-	spin_unlock_irqrestore(&mapping->tree_lock, flags);
+	if (mapping)
+		spin_unlock_irqrestore(&mapping->tree_lock, flags);
 	mem_cgroup_end_page_stat(memcg);
 	return 0;
 }
@@ -1048,8 +1064,15 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (PageAnon(page) && !PageSwapCache(page)) {
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
-			if (!add_to_swap(page, page_list))
+			if (unlikely(PageTransHuge(page)) &&
+				unlikely(split_huge_page_to_list(page,
+							page_list)))
+					goto activate_locked;
+			if (total_swap_pages &&
+					!add_to_swap(page, page_list)) {
 				goto activate_locked;
+			}
+
 			freeable = true;
 			may_enter_fs = 1;
 
@@ -1060,8 +1083,12 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		/*
 		 * The page is mapped into the page tables of one or more
 		 * processes. Try to unmap it here.
+		 *
+		 * If !CONFIG_SWAP, there is no backing store of the anonymous
+		 * page but we could discard if @page is hinted by MADV_FREE
+		 * by try_to_unmap.
 		 */
-		if (page_mapped(page) && mapping) {
+		if (page_mapped(page) && (mapping || freeable)) {
 			switch (try_to_unmap(page, freeable ?
 				(ttu_flags | TTU_BATCH_FLUSH | TTU_FREE) :
 				(ttu_flags | TTU_BATCH_FLUSH))) {
@@ -1177,7 +1204,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			}
 		}
 
-		if (!mapping || !__remove_mapping(mapping, page, true))
+		if ((!mapping && !freeable) ||
+			!__remove_mapping(mapping, page, true))
 			goto keep_locked;
 
 		/*
@@ -2003,8 +2031,11 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	if (!global_reclaim(sc))
 		force_scan = true;
 
-	/* If we have no swap space, do not bother scanning anon pages. */
-	if (!sc->may_swap || (get_nr_swap_pages() <= 0)) {
+	/*
+	 * If we have no inactive anon page, do not bother scanning
+	 * anon pages.
+	 */
+	if (!sc->may_swap || !zone_page_state(zone, NR_INACTIVE_ANON)) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
@@ -2364,8 +2395,8 @@ static inline bool should_continue_reclaim(struct zone *zone,
 	 */
 	pages_for_compaction = (2UL << sc->order);
 	inactive_lru_pages = zone_page_state(zone, NR_INACTIVE_FILE);
-	if (get_nr_swap_pages() > 0)
-		inactive_lru_pages += zone_page_state(zone, NR_INACTIVE_ANON);
+	inactive_lru_pages += zone_page_state(zone, NR_INACTIVE_ANON);
+
 	if (sc->nr_reclaimed < pages_for_compaction &&
 			inactive_lru_pages > pages_for_compaction)
 		return true;
