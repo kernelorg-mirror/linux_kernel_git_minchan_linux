@@ -642,11 +642,17 @@ static void __lru_cache_add(struct page *page)
 /**
  * lru_cache_add: add a page to the page lists
  * @page: the page to add
+ * @active: active anonymous LRU list
  */
-void lru_cache_add_anon(struct page *page)
+void lru_cache_add_anon(struct page *page, bool active)
 {
-	if (PageActive(page))
-		ClearPageActive(page);
+	if (active) {
+		if (!PageActive(page))
+			SetPageActive(page);
+	} else {
+		if (PageActive(page))
+			ClearPageActive(page);
+	}
 	__lru_cache_add(page);
 }
 

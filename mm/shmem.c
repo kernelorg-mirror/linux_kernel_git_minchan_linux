@@ -1024,7 +1024,7 @@ static int shmem_replace_page(struct page **pagep, gfp_t gfp,
 		oldpage = newpage;
 	} else {
 		mem_cgroup_migrate(oldpage, newpage, true);
-		lru_cache_add_anon(newpage);
+		lru_cache_add_anon(newpage, total_swap_pages ? false : true);
 		*pagep = newpage;
 	}
 
@@ -1206,7 +1206,7 @@ repeat:
 			goto decused;
 		}
 		mem_cgroup_commit_charge(page, memcg, false);
-		lru_cache_add_anon(page);
+		lru_cache_add_anon(page, total_swap_pages ? false : true);
 
 		spin_lock(&info->lock);
 		info->alloced++;
