@@ -45,7 +45,6 @@ int page_cluster;
 static DEFINE_PER_CPU(struct pagevec, lru_add_pvec);
 static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);
 static DEFINE_PER_CPU(struct pagevec, lru_deactivate_file_pvecs);
-static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
 
 /*
  * This path almost never happens for VM activity - pages are normally
@@ -508,6 +507,10 @@ static void __activate_page(struct page *page, struct lruvec *lruvec,
 
 		del_page_from_lru_list(page, lruvec, lru);
 		SetPageActive(page);
+		if (lru == LRU_LZFREE) {
+			ClearPageLazyFree(page);
+			lru = LRU_INACTIVE_ANON;
+		}
 		lru += LRU_ACTIVE;
 		add_page_to_lru_list(page, lruvec, lru);
 		trace_mm_lru_activate(page);
@@ -799,20 +802,41 @@ static void lru_deactivate_file_fn(struct page *page, struct lruvec *lruvec,
 	update_page_reclaim_stat(lruvec, lru_index(lru), 0);
 }
 
-
-static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
-			    void *arg)
+static void lru_lazyfree_fn(struct page *page, struct lruvec *lruvec,
+		void *arg)
 {
-	if (PageLRU(page) && PageActive(page) && !PageUnevictable(page)) {
-		enum lru_list lru = page_lru_base_type(page);
+	VM_BUG_ON_PAGE(!PageAnon(page), page);
 
-		del_page_from_lru_list(page, lruvec, lru + LRU_ACTIVE);
+	if (PageLRU(page) && !PageLazyFree(page) &&
+				!PageUnevictable(page)) {
+		unsigned int nr_pages = PageTransHuge(page) ? HPAGE_PMD_NR : 1;
+		bool active = PageActive(page);
+
+		if (!trylock_page(page))
+			return;
+		if (PageSwapCache(page))
+			return;
+		if (PageDirty(page)) {
+			/*
+			 * If page is shared with others, we couldn't clear
+			 * PG_dirty of the page.
+			 */
+			if (page_count(page) != 2) {
+				unlock_page(page);
+				return;
+			}
+			ClearPageDirty(page);
+		}
+
+		del_page_from_lru_list(page, lruvec,
+			       LRU_INACTIVE_ANON + active);
 		ClearPageActive(page);
-		ClearPageReferenced(page);
-		add_page_to_lru_list(page, lruvec, lru);
+		SetPageLazyFree(page);
+		add_page_to_lru_list(page, lruvec, LRU_LZFREE);
+		unlock_page(page);
 
-		__count_vm_event(PGDEACTIVATE);
-		update_page_reclaim_stat(lruvec, lru_index(lru), 0);
+		count_vm_events(PGLZFREE, nr_pages);
+		update_page_reclaim_stat(lruvec, 2, 0);
 	}
 }
 
@@ -842,11 +866,25 @@ void lru_add_drain_cpu(int cpu)
 	if (pagevec_count(pvec))
 		pagevec_lru_move_fn(pvec, lru_deactivate_file_fn, NULL);
 
-	pvec = &per_cpu(lru_deactivate_pvecs, cpu);
-	if (pagevec_count(pvec))
-		pagevec_lru_move_fn(pvec, lru_deactivate_fn, NULL);
-
 	activate_page_drain(cpu);
+}
+
+/*
+ * Drain lazyfree pages out of the cpu's pagevec before release pte lock
+ */
+void drain_lazyfree_pagevec(struct pagevec *pvec)
+{
+	if (pagevec_count(pvec))
+		pagevec_lru_move_fn(pvec, lru_lazyfree_fn, NULL);
+}
+
+int add_page_to_lazyfree_list(struct page *page, struct pagevec *pvec)
+{
+	if (PageLRU(page) && !PageLazyFree(page) && !PageUnevictable(page)) {
+		page_cache_get(page);
+		pagevec_add(pvec, page);
+	}
+	return pagevec_space(pvec);
 }
 
 /**
@@ -872,26 +910,6 @@ void deactivate_file_page(struct page *page)
 		if (!pagevec_add(pvec, page))
 			pagevec_lru_move_fn(pvec, lru_deactivate_file_fn, NULL);
 		put_cpu_var(lru_deactivate_file_pvecs);
-	}
-}
-
-/**
- * deactivate_page - deactivate a page
- * @page: page to deactivate
- *
- * deactivate_page() moves @page to the inactive list if @page was on the active
- * list and was not an unevictable page.  This is done to accelerate the reclaim
- * of @page.
- */
-void deactivate_page(struct page *page)
-{
-	if (PageLRU(page) && PageActive(page) && !PageUnevictable(page)) {
-		struct pagevec *pvec = &get_cpu_var(lru_deactivate_pvecs);
-
-		page_cache_get(page);
-		if (!pagevec_add(pvec, page))
-			pagevec_lru_move_fn(pvec, lru_deactivate_fn, NULL);
-		put_cpu_var(lru_deactivate_pvecs);
 	}
 }
 
@@ -924,7 +942,6 @@ void lru_add_drain_all(void)
 		if (pagevec_count(&per_cpu(lru_add_pvec, cpu)) ||
 		    pagevec_count(&per_cpu(lru_rotate_pvecs, cpu)) ||
 		    pagevec_count(&per_cpu(lru_deactivate_file_pvecs, cpu)) ||
-		    pagevec_count(&per_cpu(lru_deactivate_pvecs, cpu)) ||
 		    need_activate_page_drain(cpu)) {
 			INIT_WORK(work, lru_add_drain_per_cpu);
 			schedule_work_on(cpu, work);

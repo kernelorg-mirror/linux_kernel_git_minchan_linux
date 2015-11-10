@@ -14,8 +14,8 @@
 #include <asm/page.h>
 
 struct notifier_block;
-
 struct bio;
+struct pagevec;
 
 #define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
 #define SWAP_FLAG_PRIO_MASK	0x7fff
@@ -308,7 +308,8 @@ extern void lru_add_drain_cpu(int cpu);
 extern void lru_add_drain_all(void);
 extern void rotate_reclaimable_page(struct page *page);
 extern void deactivate_file_page(struct page *page);
-extern void deactivate_page(struct page *page);
+extern void drain_lazyfree_pagevec(struct pagevec *pvec);
+extern int add_page_to_lazyfree_list(struct page *page, struct pagevec *pvec);
 extern void swap_setup(void);
 
 extern void add_page_to_unevictable_list(struct page *page);

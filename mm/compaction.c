@@ -626,7 +626,7 @@ isolate_freepages_range(struct compact_control *cc,
 static void acct_isolated(struct zone *zone, struct compact_control *cc)
 {
 	struct page *page;
-	unsigned int count[2] = { 0, };
+	unsigned int count[3] = { 0, };
 
 	if (list_empty(&cc->migratepages))
 		return;
@@ -636,21 +636,25 @@ static void acct_isolated(struct zone *zone, struct compact_control *cc)
 
 	mod_zone_page_state(zone, NR_ISOLATED_ANON, count[0]);
 	mod_zone_page_state(zone, NR_ISOLATED_FILE, count[1]);
+	mod_zone_page_state(zone, NR_ISOLATED_LZFREE, count[2]);
 }
 
 /* Similar to reclaim, but different enough that they don't share logic */
 static bool too_many_isolated(struct zone *zone)
 {
-	unsigned long active, inactive, isolated;
+	unsigned long active, inactive, lzfree, isolated;
 
 	inactive = zone_page_state(zone, NR_INACTIVE_FILE) +
 					zone_page_state(zone, NR_INACTIVE_ANON);
 	active = zone_page_state(zone, NR_ACTIVE_FILE) +
 					zone_page_state(zone, NR_ACTIVE_ANON);
-	isolated = zone_page_state(zone, NR_ISOLATED_FILE) +
-					zone_page_state(zone, NR_ISOLATED_ANON);
+	lzfree = zone_page_state(zone, NR_LZFREE);
 
-	return isolated > (inactive + active) / 2;
+	isolated = zone_page_state(zone, NR_ISOLATED_FILE) +
+			zone_page_state(zone, NR_ISOLATED_ANON) +
+			zone_page_state(zone, NR_ISOLATED_LZFREE);
+
+	return isolated > (inactive + active + lzfree) / 2;
 }
 
 /**

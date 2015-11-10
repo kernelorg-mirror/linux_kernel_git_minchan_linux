@@ -21,6 +21,7 @@
 #include <linux/swap.h>
 #include <linux/swapops.h>
 #include <linux/mmu_notifier.h>
+#include <linux/pagevec.h>
 
 #include <asm/tlb.h>
 
@@ -272,12 +273,15 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 	struct page *page;
 	int nr_swap = 0;
 	unsigned long next;
+	struct pagevec pvec;
+
+	pagevec_init(&pvec, 0);
 
 	next = pmd_addr_end(addr, end);
 	if (pmd_trans_huge(*pmd)) {
 		if (next - addr != HPAGE_PMD_SIZE)
 			split_huge_page_pmd(vma, addr, pmd);
-		else if (!madvise_free_huge_pmd(tlb, vma, pmd, addr))
+		else if (!madvise_free_huge_pmd(tlb, vma, pmd, addr, &pvec))
 			goto next;
 		/* fall through */
 	}
@@ -315,24 +319,17 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 
 		VM_BUG_ON_PAGE(PageTransCompound(page), page);
 
-		if (PageSwapCache(page) || PageDirty(page)) {
+		if (page_mapcount(page) != 1)
+			continue;
+
+		if (PageSwapCache(page)) {
 			if (!trylock_page(page))
 				continue;
-			/*
-			 * If page is shared with others, we couldn't clear
-			 * PG_dirty of the page.
-			 */
-			if (page_mapcount(page) != 1) {
+			if (PageSwapCache(page) &&
+					!try_to_free_swap(page)) {
 				unlock_page(page);
 				continue;
 			}
-
-			if (PageSwapCache(page) && !try_to_free_swap(page)) {
-				unlock_page(page);
-				continue;
-			}
-
-			ClearPageDirty(page);
 			unlock_page(page);
 		}
 
@@ -348,11 +345,21 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 
 			ptent = pte_mkold(ptent);
 			ptent = pte_mkclean(ptent);
+			/*
+			 * Page could lost dirty bit without moving
+			 * lazyfree LRU list so the result causes
+			 * freeing the page without paging out.
+			 * So let's move the dirtiness to page->flags.
+			 * If it is moved to lazyfree successfully,
+			 * lru_lazyfree_fn will clear it.
+			 */
+			SetPageDirty(page);
 			set_pte_at(mm, addr, pte, ptent);
-			if (PageActive(page))
-				deactivate_page(page);
 			tlb_remove_tlb_entry(tlb, pte, addr);
 		}
+
+		if (add_page_to_lazyfree_list(page, &pvec) == 0)
+			drain_lazyfree_pagevec(&pvec);
 	}
 
 	if (nr_swap) {
@@ -362,6 +369,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 		add_mm_counter(mm, MM_SWAPENTS, nr_swap);
 	}
 
+	drain_lazyfree_pagevec(&pvec);
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(pte - 1, ptl);
 	cond_resched();

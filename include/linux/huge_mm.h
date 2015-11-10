@@ -1,6 +1,8 @@
 #ifndef _LINUX_HUGE_MM_H
 #define _LINUX_HUGE_MM_H
 
+struct pagevec;
+
 extern int do_huge_pmd_anonymous_page(struct mm_struct *mm,
 				      struct vm_area_struct *vma,
 				      unsigned long address, pmd_t *pmd,
@@ -21,7 +23,8 @@ extern struct page *follow_trans_huge_pmd(struct vm_area_struct *vma,
 					  unsigned int flags);
 extern int madvise_free_huge_pmd(struct mmu_gather *tlb,
 			struct vm_area_struct *vma,
-			pmd_t *pmd, unsigned long addr);
+			pmd_t *pmd, unsigned long addr,
+			struct pagevec *pvec);
 extern int zap_huge_pmd(struct mmu_gather *tlb,
 			struct vm_area_struct *vma,
 			pmd_t *pmd, unsigned long addr);

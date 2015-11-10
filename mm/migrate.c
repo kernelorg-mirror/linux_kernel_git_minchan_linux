@@ -508,6 +508,8 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 		SetPageChecked(newpage);
 	if (PageMappedToDisk(page))
 		SetPageMappedToDisk(newpage);
+	if (PageLazyFree(page))
+		SetPageLazyFree(newpage);
 
 	if (PageDirty(page)) {
 		clear_page_dirty_for_io(page);

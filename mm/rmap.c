@@ -1374,10 +1374,17 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		swp_entry_t entry = { .val = page_private(page) };
 		pte_t swp_pte;
 
-		if (!PageDirty(page) && (flags & TTU_FREE)) {
-			/* It's a freeable page by MADV_FREE */
-			dec_mm_counter(mm, MM_ANONPAGES);
-			goto discard;
+		if ((flags & TTU_LZFREE)) {
+			VM_BUG_ON_PAGE(!PageLazyFree(page), page);
+			if (!PageDirty(page)) {
+				/* It's a freeable page by MADV_FREE */
+				dec_mm_counter(mm, MM_ANONPAGES);
+				goto discard;
+			} else {
+				set_pte_at(mm, address, pte, pteval);
+				ret = SWAP_FAIL;
+				goto out_unmap;
+			}
 		}
 
 		if (PageSwapCache(page)) {

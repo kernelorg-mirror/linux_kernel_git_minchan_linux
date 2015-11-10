@@ -1454,7 +1454,7 @@ out:
 }
 
 int madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
-		pmd_t *pmd, unsigned long addr)
+		pmd_t *pmd, unsigned long addr, struct pagevec *pvec)
 
 {
 	spinlock_t *ptl;
@@ -1478,18 +1478,18 @@ int madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		ClearPageDirty(page);
 	unlock_page(page);
 
-	if (PageActive(page))
-		deactivate_page(page);
-
 	if (pmd_young(orig_pmd) || pmd_dirty(orig_pmd)) {
 		orig_pmd = pmdp_huge_get_and_clear_full(tlb->mm, addr, pmd,
 			tlb->fullmm);
 		orig_pmd = pmd_mkold(orig_pmd);
 		orig_pmd = pmd_mkclean(orig_pmd);
-
+		SetPageDirty(page);
 		set_pmd_at(mm, addr, pmd, orig_pmd);
 		tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
 	}
+
+	add_page_to_lazyfree_list(page, pvec);
+	drain_lazyfree_pagevec(pvec);
 out:
 	spin_unlock(ptl);
 
@@ -1795,6 +1795,7 @@ static void __split_huge_page_refcount(struct page *page,
 				      (1L << PG_mlocked) |
 				      (1L << PG_uptodate) |
 				      (1L << PG_active) |
+				      (1L << PG_lazyfree) |
 				      (1L << PG_unevictable) |
 				      (1L << PG_dirty)));
 
