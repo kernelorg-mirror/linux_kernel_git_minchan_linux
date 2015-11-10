@@ -8,8 +8,8 @@
  * page_is_file_cache - should the page be on a file LRU or anon LRU?
  * @page: the page to test
  *
- * Returns 1 if @page is page cache page backed by a regular filesystem,
- * or 0 if @page is anonymous, tmpfs or otherwise ram or swap backed.
+ * Returns true if @page is page cache page backed by a regular filesystem,
+ * or false if @page is anonymous, tmpfs or otherwise ram or swap backed.
  * Used by functions that manipulate the LRU lists, to sort a page
  * onto the right LRU list.
  *
@@ -17,7 +17,7 @@
  * needs to survive until the page is last deleted from the LRU, which
  * could be as far down as __page_cache_release.
  */
-static inline int page_is_file_cache(struct page *page)
+static inline bool page_is_file_cache(struct page *page)
 {
 	return !PageSwapBacked(page);
 }
@@ -53,6 +53,64 @@ static inline enum lru_list page_lru_base_type(struct page *page)
 	if (page_is_file_cache(page))
 		return LRU_INACTIVE_FILE;
 	return LRU_INACTIVE_ANON;
+}
+
+/**
+ * lru_index - which LRU list is lru on for accouting update_page_reclaim_stat
+ *
+ * Used for LRU list index arithmetic.
+ *
+ * Returns 0 if @lru is anon, 1 if it is file.
+ */
+static inline int lru_index(enum lru_list lru)
+{
+	int base;
+
+	switch (lru) {
+	case LRU_INACTIVE_ANON:
+	case LRU_ACTIVE_ANON:
+		base = 0;
+		break;
+	case LRU_INACTIVE_FILE:
+	case LRU_ACTIVE_FILE:
+		base = 1;
+		break;
+	default:
+		BUG();
+	}
+	return base;
+}
+
+/*
+ * page_off_isolate - which LRU list was page on for accouting NR_ISOLATED.
+ * @page: the page to test
+ *
+ * Returns the LRU list a page was on, as an index into the array of
+ * zone_page_state;
+ */
+static inline int page_off_isolate(struct page *page)
+{
+	int lru = NR_ISOLATED_ANON;
+
+	if (!PageSwapBacked(page))
+		lru = NR_ISOLATED_FILE;
+	return lru;
+}
+
+/**
+ * lru_off_isolate - which LRU list was @lru on for accouting NR_ISOLATED.
+ * @lru: the lru to test
+ *
+ * Returns the LRU list a page was on, as an index into the array of
+ * zone_page_state;
+ */
+static inline int lru_off_isolate(enum lru_list lru)
+{
+	int base = NR_ISOLATED_FILE;
+
+	if (lru <= LRU_ACTIVE_ANON)
+		base = NR_ISOLATED_ANON;
+	return base;
 }
 
 /**

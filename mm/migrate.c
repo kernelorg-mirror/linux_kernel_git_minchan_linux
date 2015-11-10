@@ -91,8 +91,7 @@ void putback_movable_pages(struct list_head *l)
 			continue;
 		}
 		list_del(&page->lru);
-		dec_zone_page_state(page, NR_ISOLATED_ANON +
-				page_is_file_cache(page));
+		dec_zone_page_state(page, page_off_isolate(page));
 		if (unlikely(isolated_balloon_page(page)))
 			balloon_page_putback(page);
 		else
@@ -964,8 +963,7 @@ out:
 		 * restored.
 		 */
 		list_del(&page->lru);
-		dec_zone_page_state(page, NR_ISOLATED_ANON +
-				page_is_file_cache(page));
+		dec_zone_page_state(page, page_off_isolate(page));
 		/* Soft-offlined page shouldn't go through lru cache list */
 		if (reason == MR_MEMORY_FAILURE) {
 			put_page(page);
@@ -1278,8 +1276,7 @@ static int do_move_page_to_node_array(struct mm_struct *mm,
 		err = isolate_lru_page(page);
 		if (!err) {
 			list_add_tail(&page->lru, &pagelist);
-			inc_zone_page_state(page, NR_ISOLATED_ANON +
-					    page_is_file_cache(page));
+			inc_zone_page_state(page, page_off_isolate(page));
 		}
 put_and_set:
 		/*
@@ -1622,8 +1619,6 @@ static bool numamigrate_update_ratelimit(pg_data_t *pgdat,
 
 static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 {
-	int page_lru;
-
 	VM_BUG_ON_PAGE(compound_order(page) && !PageTransHuge(page), page);
 
 	/* Avoid migrating to a node that is nearly full */
@@ -1645,8 +1640,7 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 		return 0;
 	}
 
-	page_lru = page_is_file_cache(page);
-	mod_zone_page_state(page_zone(page), NR_ISOLATED_ANON + page_lru,
+	mod_zone_page_state(page_zone(page), page_off_isolate(page),
 				hpage_nr_pages(page));
 
 	/*
@@ -1704,8 +1698,7 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
 	if (nr_remaining) {
 		if (!list_empty(&migratepages)) {
 			list_del(&page->lru);
-			dec_zone_page_state(page, NR_ISOLATED_ANON +
-					page_is_file_cache(page));
+			dec_zone_page_state(page, page_off_isolate(page));
 			putback_lru_page(page);
 		}
 		isolated = 0;
@@ -1735,7 +1728,7 @@ int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 	pg_data_t *pgdat = NODE_DATA(node);
 	int isolated = 0;
 	struct page *new_page = NULL;
-	int page_lru = page_is_file_cache(page);
+	int page_lru = page_off_isolate(page);
 	unsigned long mmun_start = address & HPAGE_PMD_MASK;
 	unsigned long mmun_end = mmun_start + HPAGE_PMD_SIZE;
 	pmd_t orig_entry;
@@ -1794,8 +1787,7 @@ fail_putback:
 		/* Retake the callers reference and putback on LRU */
 		get_page(page);
 		putback_lru_page(page);
-		mod_zone_page_state(page_zone(page),
-			 NR_ISOLATED_ANON + page_lru, -HPAGE_PMD_NR);
+		mod_zone_page_state(page_zone(page), page_lru, -HPAGE_PMD_NR);
 
 		goto out_unlock;
 	}
@@ -1847,9 +1839,7 @@ fail_putback:
 	count_vm_events(PGMIGRATE_SUCCESS, HPAGE_PMD_NR);
 	count_vm_numa_events(NUMA_PAGE_MIGRATE, HPAGE_PMD_NR);
 
-	mod_zone_page_state(page_zone(page),
-			NR_ISOLATED_ANON + page_lru,
-			-HPAGE_PMD_NR);
+	mod_zone_page_state(page_zone(page), page_lru, -HPAGE_PMD_NR);
 	return isolated;
 
 out_fail:

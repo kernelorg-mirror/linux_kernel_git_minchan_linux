@@ -1398,7 +1398,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 
 	*nr_scanned = scan;
 	trace_mm_vmscan_lru_isolate(sc->order, nr_to_scan, scan,
-				    nr_taken, mode, is_file_lru(lru));
+				    nr_taken, mode, lru_index(lru));
 	return nr_taken;
 }
 
@@ -1599,7 +1599,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 				     &nr_scanned, sc, isolate_mode, lru);
 
 	__mod_zone_page_state(zone, NR_LRU_BASE + lru, -nr_taken);
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), nr_taken);
 
 	if (global_reclaim(sc)) {
 		__mod_zone_page_state(zone, NR_PAGES_SCANNED, nr_scanned);
@@ -1633,7 +1633,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	putback_inactive_pages(lruvec, &page_list);
 
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, -nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), -nr_taken);
 
 	spin_unlock_irq(&zone->lru_lock);
 
@@ -1701,7 +1701,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		zone_idx(zone),
 		nr_scanned, nr_reclaimed,
 		sc->priority,
-		trace_shrink_flags(file));
+		trace_shrink_flags(lru));
 	return nr_reclaimed;
 }
 
@@ -1800,7 +1800,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 
 	__count_zone_vm_events(PGREFILL, zone, nr_scanned);
 	__mod_zone_page_state(zone, NR_LRU_BASE + lru, -nr_taken);
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), nr_taken);
 	spin_unlock_irq(&zone->lru_lock);
 
 	while (!list_empty(&l_hold)) {
@@ -1857,7 +1857,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 
 	move_active_pages_to_lru(lruvec, &l_active, &l_hold, lru);
 	move_active_pages_to_lru(lruvec, &l_inactive, &l_hold, lru - LRU_ACTIVE);
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, -nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), -nr_taken);
 	spin_unlock_irq(&zone->lru_lock);
 
 	mem_cgroup_uncharge_list(&l_hold);

@@ -30,9 +30,9 @@
 	(RECLAIM_WB_ASYNC) \
 	)
 
-#define trace_shrink_flags(file) \
+#define trace_shrink_flags(lru) \
 	( \
-		(file ? RECLAIM_WB_FILE : RECLAIM_WB_ANON) | \
+		(lru ? RECLAIM_WB_FILE : RECLAIM_WB_ANON) | \
 		(RECLAIM_WB_ASYNC) \
 	)
 
@@ -271,9 +271,9 @@ DECLARE_EVENT_CLASS(mm_vmscan_lru_isolate_template,
 		unsigned long nr_scanned,
 		unsigned long nr_taken,
 		isolate_mode_t isolate_mode,
-		int file),
+		enum lru_list lru),
 
-	TP_ARGS(order, nr_requested, nr_scanned, nr_taken, isolate_mode, file),
+	TP_ARGS(order, nr_requested, nr_scanned, nr_taken, isolate_mode, lru),
 
 	TP_STRUCT__entry(
 		__field(int, order)
@@ -281,7 +281,7 @@ DECLARE_EVENT_CLASS(mm_vmscan_lru_isolate_template,
 		__field(unsigned long, nr_scanned)
 		__field(unsigned long, nr_taken)
 		__field(isolate_mode_t, isolate_mode)
-		__field(int, file)
+		__field(enum lru_list, lru)
 	),
 
 	TP_fast_assign(
@@ -290,16 +290,16 @@ DECLARE_EVENT_CLASS(mm_vmscan_lru_isolate_template,
 		__entry->nr_scanned = nr_scanned;
 		__entry->nr_taken = nr_taken;
 		__entry->isolate_mode = isolate_mode;
-		__entry->file = file;
+		__entry->lru = lru;
 	),
 
-	TP_printk("isolate_mode=%d order=%d nr_requested=%lu nr_scanned=%lu nr_taken=%lu file=%d",
+	TP_printk("isolate_mode=%d order=%d nr_requested=%lu nr_scanned=%lu nr_taken=%lu lru=%d",
 		__entry->isolate_mode,
 		__entry->order,
 		__entry->nr_requested,
 		__entry->nr_scanned,
 		__entry->nr_taken,
-		__entry->file)
+		__entry->lru)
 );
 
 DEFINE_EVENT(mm_vmscan_lru_isolate_template, mm_vmscan_lru_isolate,
@@ -309,9 +309,9 @@ DEFINE_EVENT(mm_vmscan_lru_isolate_template, mm_vmscan_lru_isolate,
 		unsigned long nr_scanned,
 		unsigned long nr_taken,
 		isolate_mode_t isolate_mode,
-		int file),
+		enum lru_list lru),
 
-	TP_ARGS(order, nr_requested, nr_scanned, nr_taken, isolate_mode, file)
+	TP_ARGS(order, nr_requested, nr_scanned, nr_taken, isolate_mode, lru)
 
 );
 
@@ -322,9 +322,9 @@ DEFINE_EVENT(mm_vmscan_lru_isolate_template, mm_vmscan_memcg_isolate,
 		unsigned long nr_scanned,
 		unsigned long nr_taken,
 		isolate_mode_t isolate_mode,
-		int file),
+		enum lru_list lru),
 
-	TP_ARGS(order, nr_requested, nr_scanned, nr_taken, isolate_mode, file)
+	TP_ARGS(order, nr_requested, nr_scanned, nr_taken, isolate_mode, lru)
 
 );
 
