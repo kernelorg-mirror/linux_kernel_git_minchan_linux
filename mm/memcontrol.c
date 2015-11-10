@@ -108,8 +108,8 @@ static const char * const mem_cgroup_lru_names[] = {
 	"active_anon",
 	"inactive_file",
 	"active_file",
-	"unevictable",
 	"lazyfree",
+	"unevictable",
 };
 
 #define THRESHOLDS_EVENTS_TARGET 128
@@ -3288,6 +3288,30 @@ static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
 	return 0;
 }
 
+static u64 mem_cgroup_lzfreeness_read(struct cgroup_subsys_state *css,
+				      struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return mem_cgroup_lzfreeness(memcg);
+}
+
+static int mem_cgroup_lzfreeness_write(struct cgroup_subsys_state *css,
+				       struct cftype *cft, u64 val)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	if (val > 100)
+		return -EINVAL;
+
+	if (css->parent)
+		memcg->lzfreeness = val;
+	else
+		vm_lazyfreeness = val;
+
+	return 0;
+}
+
 static void __mem_cgroup_threshold(struct mem_cgroup *memcg, bool swap)
 {
 	struct mem_cgroup_threshold_ary *t;
@@ -4085,6 +4109,11 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.write_u64 = mem_cgroup_swappiness_write,
 	},
 	{
+		.name = "lazyfreeness",
+		.read_u64 = mem_cgroup_lzfreeness_read,
+		.write_u64 = mem_cgroup_lzfreeness_write,
+	},
+	{
 		.name = "move_charge_at_immigrate",
 		.read_u64 = mem_cgroup_move_charge_read,
 		.write_u64 = mem_cgroup_move_charge_write,
@@ -4305,6 +4334,7 @@ mem_cgroup_css_online(struct cgroup_subsys_state *css)
 	memcg->use_hierarchy = parent->use_hierarchy;
 	memcg->oom_kill_disable = parent->oom_kill_disable;
 	memcg->swappiness = mem_cgroup_swappiness(parent);
+	memcg->lzfreeness = mem_cgroup_lzfreeness(parent);
 
 	if (parent->use_hierarchy) {
 		page_counter_init(&memcg->memory, &parent->memory);

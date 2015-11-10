@@ -56,6 +56,7 @@ Currently, these files are in /proc/sys/vm:
 - percpu_pagelist_fraction
 - stat_interval
 - swappiness
+- lazyfreeness
 - user_reserve_kbytes
 - vfs_cache_pressure
 - zone_reclaim_mode
@@ -734,6 +735,18 @@ initiate swap until the amount of free and file-backed pages is less
 than the high water mark in a zone.
 
 The default value is 60.
+
+==============================================================
+
+lazyfreeness
+
+This control is used to define how aggressive the kernel will discard
+MADV_FREE hinted pages.  Higher values will increase agressiveness,
+lower values decrease the amount of discarding.  A value of 0 instructs
+the kernel not to initiate discarding until the amount of free and
+file-backed pages is less than the high water mark in a zone.
+
+The default value is 20.
 
 ==============================================================
 

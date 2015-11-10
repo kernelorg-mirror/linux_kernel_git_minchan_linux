@@ -101,8 +101,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		"Inactive(anon): %8lu kB\n"
 		"Active(file):   %8lu kB\n"
 		"Inactive(file): %8lu kB\n"
-		"Unevictable:    %8lu kB\n"
 		"LazyFree:	 %8lu kB\n"
+		"Unevictable:    %8lu kB\n"
 		"Mlocked:        %8lu kB\n"
 #ifdef CONFIG_HIGHMEM
 		"HighTotal:      %8lu kB\n"
@@ -159,8 +159,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		K(pages[LRU_INACTIVE_ANON]),
 		K(pages[LRU_ACTIVE_FILE]),
 		K(pages[LRU_INACTIVE_FILE]),
-		K(pages[LRU_UNEVICTABLE]),
 		K(pages[LRU_LZFREE]),
+		K(pages[LRU_UNEVICTABLE]),
 		K(global_page_state(NR_MLOCK)),
 #ifdef CONFIG_HIGHMEM
 		K(i.totalhigh),
