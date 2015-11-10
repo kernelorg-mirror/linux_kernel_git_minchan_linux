@@ -210,6 +210,7 @@ struct mem_cgroup {
 	int		under_oom;
 
 	int	swappiness;
+	int	lzfreeness;
 	/* OOM-Killer disable */
 	int		oom_kill_disable;
 

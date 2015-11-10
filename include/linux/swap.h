@@ -331,6 +331,7 @@ extern unsigned long mem_cgroup_shrink_node_zone(struct mem_cgroup *mem,
 						unsigned long *nr_scanned);
 extern unsigned long shrink_all_memory(unsigned long nr_pages);
 extern int vm_swappiness;
+extern int vm_lazyfreeness;
 extern int remove_mapping(struct address_space *mapping, struct page *page);
 extern unsigned long vm_total_pages;
 
@@ -362,10 +363,24 @@ static inline int mem_cgroup_swappiness(struct mem_cgroup *memcg)
 	return memcg->swappiness;
 }
 
+static inline int mem_cgroup_lzfreeness(struct mem_cgroup *memcg)
+{
+	/* root ? */
+	if (mem_cgroup_disabled() || !memcg->css.parent)
+		return vm_lazyfreeness;
+
+	return memcg->lzfreeness;
+}
+
 #else
 static inline int mem_cgroup_swappiness(struct mem_cgroup *mem)
 {
 	return vm_swappiness;
+}
+
+static inline int mem_cgroup_lzfreeness(struct mem_cgroup *mem)
+{
+	return vm_lazyfreeness;
 }
 #endif
 #ifdef CONFIG_MEMCG_SWAP

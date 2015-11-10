@@ -141,6 +141,10 @@ struct scan_control {
  */
 int vm_swappiness = 60;
 /*
+ * From 0 .. 100.  Higher means more lazy freeing.
+ */
+int vm_lazyfreeness = 40;
+/*
  * The total number of pages which are beyond the high watermark within all
  * zones.
  */
@@ -1989,10 +1993,11 @@ static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
 }
 
 enum scan_balance {
-	SCAN_EQUAL,
-	SCAN_FRACT,
-	SCAN_ANON,
-	SCAN_FILE,
+	SCAN_EQUAL = (1 << 0),
+	SCAN_FRACT = (1 << 1),
+	SCAN_ANON = (1 << 2),
+	SCAN_FILE = (1 << 3),
+	SCAN_LZFREE = (1 << 4),
 };
 
 /*
@@ -2003,20 +2008,21 @@ enum scan_balance {
  *
  * nr[0] = anon inactive pages to scan; nr[1] = anon active pages to scan
  * nr[2] = file inactive pages to scan; nr[3] = file active pages to scan
+ * nr[4] = lazy free pages to scan;
  */
 static void get_scan_count(struct lruvec *lruvec, int swappiness,
-			   struct scan_control *sc, unsigned long *nr,
-			   unsigned long *lru_pages)
+			int lzfreeness, struct scan_control *sc,
+			unsigned long *nr, unsigned long *lru_pages)
 {
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
-	u64 fraction[2];
+	u64 fraction[3];
 	u64 denominator = 0;	/* gcc */
 	struct zone *zone = lruvec_zone(lruvec);
-	unsigned long anon_prio, file_prio;
-	enum scan_balance scan_balance;
-	unsigned long anon, file;
+	unsigned long anon_prio, file_prio, lzfree_prio;
+	enum scan_balance scan_balance = 0;
+	unsigned long anon, file, lzfree;
 	bool force_scan = false;
-	unsigned long ap, fp;
+	unsigned long ap, fp, lp;
 	enum lru_list lru;
 	bool some_scanned;
 	int pass;
@@ -2040,9 +2046,19 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	if (!global_reclaim(sc))
 		force_scan = true;
 
+	/*
+	 * If we have lazyfree pages and lzfreeness is enough high,
+	 * scan only lazyfree LRU to prevent to reclaim other pages
+	 * until lazyfree LRU list is empty.
+	 */
+	if (get_lru_size(lruvec, LRU_LZFREE) && lzfreeness >= 80) {
+		scan_balance = SCAN_LZFREE;
+		goto out;
+	}
+
 	/* If we have no swap space, do not bother scanning anon pages. */
 	if (!sc->may_swap || (get_nr_swap_pages() <= 0)) {
-		scan_balance = SCAN_FILE;
+		scan_balance = SCAN_FILE|SCAN_LZFREE;
 		goto out;
 	}
 
@@ -2054,7 +2070,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 * too expensive.
 	 */
 	if (!global_reclaim(sc) && !swappiness) {
-		scan_balance = SCAN_FILE;
+		scan_balance = SCAN_FILE|SCAN_LZFREE;
 		goto out;
 	}
 
@@ -2086,7 +2102,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 			   zone_page_state(zone, NR_INACTIVE_FILE);
 
 		if (unlikely(zonefile + zonefree <= high_wmark_pages(zone))) {
-			scan_balance = SCAN_ANON;
+			scan_balance = SCAN_ANON|SCAN_LZFREE;
 			goto out;
 		}
 	}
@@ -2096,7 +2112,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 * anything from the anonymous working set right now.
 	 */
 	if (!inactive_file_is_low(lruvec)) {
-		scan_balance = SCAN_FILE;
+		scan_balance = SCAN_FILE|SCAN_LZFREE;
 		goto out;
 	}
 
@@ -2108,6 +2124,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 	 */
 	anon_prio = swappiness;
 	file_prio = 200 - anon_prio;
+	lzfree_prio = 100 + lzfreeness;
 
 	/*
 	 * OK, so we have swap space and a fair amount of page cache
@@ -2125,6 +2142,7 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 		get_lru_size(lruvec, LRU_INACTIVE_ANON);
 	file  = get_lru_size(lruvec, LRU_ACTIVE_FILE) +
 		get_lru_size(lruvec, LRU_INACTIVE_FILE);
+	lzfree = get_lru_size(lruvec, LRU_LZFREE);
 
 	spin_lock_irq(&zone->lru_lock);
 	if (unlikely(reclaim_stat->recent_scanned[0] > anon / 4)) {
@@ -2137,6 +2155,11 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 		reclaim_stat->recent_rotated[1] /= 2;
 	}
 
+	if (unlikely(reclaim_stat->recent_scanned[2] > lzfree / 4)) {
+		reclaim_stat->recent_scanned[2] /= 2;
+		reclaim_stat->recent_rotated[2] /= 2;
+	}
+
 	/*
 	 * The amount of pressure on anon vs file pages is inversely
 	 * proportional to the fraction of recently scanned pages on
@@ -2147,13 +2170,18 @@ static void get_scan_count(struct lruvec *lruvec, int swappiness,
 
 	fp = file_prio * (reclaim_stat->recent_scanned[1] + 1);
 	fp /= reclaim_stat->recent_rotated[1] + 1;
+
+	lp = lzfree_prio * (reclaim_stat->recent_scanned[2] + 1);
+	lp /= reclaim_stat->recent_rotated[2] + 1;
 	spin_unlock_irq(&zone->lru_lock);
 
 	fraction[0] = ap;
 	fraction[1] = fp;
-	denominator = ap + fp + 1;
+	fraction[2] = lp;
+	denominator = ap + fp + lp + 1;
 out:
 	some_scanned = false;
+
 	/* Only use force_scan on second pass. */
 	for (pass = 0; !some_scanned && pass < 2; pass++) {
 		*lru_pages = 0;
@@ -2168,34 +2196,34 @@ out:
 			if (!scan && pass && force_scan)
 				scan = min(size, SWAP_CLUSTER_MAX);
 
-			switch (scan_balance) {
-			case SCAN_EQUAL:
-				/* Scan lists relative to size */
-				break;
-			case SCAN_FRACT:
+			if (scan_balance & SCAN_FRACT) {
 				/*
 				 * Scan types proportional to swappiness and
 				 * their relative recent reclaim efficiency.
 				 */
 				scan = div64_u64(scan * fraction[file],
 							denominator);
-				break;
-			case SCAN_FILE:
-			case SCAN_ANON:
-				/* Scan one type exclusively */
-				if ((scan_balance == SCAN_FILE) != file) {
-					size = 0;
-					scan = 0;
-				}
-				break;
-			default:
-				/* Look ma, no brain */
-				BUG();
+				goto scan;
 			}
 
+			/* Scan lists relative to size */
+			if (scan_balance & SCAN_EQUAL)
+				goto scan;
+
+			if (scan_balance & SCAN_FILE && is_file_lru(lru))
+				goto scan;
+
+			if (scan_balance & SCAN_ANON && is_anon_lru(lru))
+				goto scan;
+
+			if (scan_balance & SCAN_LZFREE &&
+						is_lazyfree_lru(lru))
+				goto scan;
+
+			continue;
+scan:
 			*lru_pages += size;
 			nr[lru] = scan;
-
 			/*
 			 * Skip the second pass and don't force_scan,
 			 * if we found something to scan.
@@ -2226,23 +2254,22 @@ static inline void init_tlb_ubc(void)
  * This is a basic per-zone page freer.  Used by both kswapd and direct reclaim.
  */
 static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
-			  struct scan_control *sc, unsigned long *lru_pages)
+			int lzfreeness, struct scan_control *sc,
+			unsigned long *lru_pages)
 {
-	unsigned long nr[NR_LRU_LISTS];
-	unsigned long targets[NR_LRU_LISTS];
+	unsigned long nr[NR_LRU_LISTS] = {0,};
+	unsigned long targets[NR_LRU_LISTS] = {0,};
 	unsigned long nr_to_scan;
-	unsigned long nr_to_scan_lzfree;
 	enum lru_list lru;
 	unsigned long nr_reclaimed = 0;
 	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
 	struct blk_plug plug;
 	bool scan_adjusted;
 
-	get_scan_count(lruvec, swappiness, sc, nr, lru_pages);
+	get_scan_count(lruvec, swappiness, lzfreeness, sc, nr, lru_pages);
 
 	/* Record the original scan target for proportional adjustments later */
 	memcpy(targets, nr, sizeof(nr));
-	nr_to_scan_lzfree = get_lru_size(lruvec, LRU_LZFREE);
 
 	/*
 	 * Global reclaiming within direct reclaim at DEF_PRIORITY is a normal
@@ -2260,22 +2287,9 @@ static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
 
 	init_tlb_ubc();
 
-	while (nr_to_scan_lzfree) {
-		nr_to_scan = min(nr_to_scan_lzfree, SWAP_CLUSTER_MAX);
-		nr_to_scan_lzfree -= nr_to_scan;
-
-		nr_reclaimed += shrink_inactive_list(nr_to_scan, lruvec,
-						sc, LRU_LZFREE);
-	}
-
-	if (nr_reclaimed >= nr_to_reclaim) {
-		sc->nr_reclaimed += nr_reclaimed;
-		return;
-	}
-
 	blk_start_plug(&plug);
 	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
-					nr[LRU_INACTIVE_FILE]) {
+		nr[LRU_INACTIVE_FILE] || nr[LRU_LZFREE]) {
 		unsigned long nr_anon, nr_file, percentage;
 		unsigned long nr_scanned;
 
@@ -2457,7 +2471,7 @@ static bool shrink_zone(struct zone *zone, struct scan_control *sc,
 			unsigned long lru_pages;
 			unsigned long scanned;
 			struct lruvec *lruvec;
-			int swappiness;
+			int swappiness, lzfreeness;
 
 			if (mem_cgroup_low(root, memcg)) {
 				if (!sc->may_thrash)
@@ -2467,9 +2481,11 @@ static bool shrink_zone(struct zone *zone, struct scan_control *sc,
 
 			lruvec = mem_cgroup_zone_lruvec(zone, memcg);
 			swappiness = mem_cgroup_swappiness(memcg);
+			lzfreeness = mem_cgroup_lzfreeness(memcg);
 			scanned = sc->nr_scanned;
 
-			shrink_lruvec(lruvec, swappiness, sc, &lru_pages);
+			shrink_lruvec(lruvec, swappiness, lzfreeness,
+					sc, &lru_pages);
 			zone_lru_pages += lru_pages;
 
 			if (memcg && is_classzone)
@@ -2935,6 +2951,7 @@ unsigned long mem_cgroup_shrink_node_zone(struct mem_cgroup *memcg,
 	};
 	struct lruvec *lruvec = mem_cgroup_zone_lruvec(zone, memcg);
 	int swappiness = mem_cgroup_swappiness(memcg);
+	int lzfreeness = mem_cgroup_lzfreeness(memcg);
 	unsigned long lru_pages;
 
 	sc.gfp_mask = (gfp_mask & GFP_RECLAIM_MASK) |
@@ -2951,7 +2968,7 @@ unsigned long mem_cgroup_shrink_node_zone(struct mem_cgroup *memcg,
 	 * will pick up pages from other mem cgroup's as well. We hack
 	 * the priority and make it zero.
 	 */
-	shrink_lruvec(lruvec, swappiness, &sc, &lru_pages);
+	shrink_lruvec(lruvec, swappiness, lzfreeness, &sc, &lru_pages);
 
 	trace_mm_vmscan_memcg_softlimit_reclaim_end(sc.nr_reclaimed);
 
