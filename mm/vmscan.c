@@ -1398,7 +1398,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 
 	*nr_scanned = scan;
 	trace_mm_vmscan_lru_isolate(sc->order, nr_to_scan, scan,
-				    nr_taken, mode, is_file_lru(lru));
+				    nr_taken, mode, lru_index(lru));
 	return nr_taken;
 }
 
@@ -1518,9 +1518,9 @@ putback_inactive_pages(struct lruvec *lruvec, struct list_head *page_list)
 		add_page_to_lru_list(page, lruvec, lru);
 
 		if (is_active_lru(lru)) {
-			int file = is_file_lru(lru);
 			int numpages = hpage_nr_pages(page);
-			reclaim_stat->recent_rotated[file] += numpages;
+			reclaim_stat->recent_rotated[lru_index(lru)]
+				+= numpages;
 		}
 		if (put_page_testzero(page)) {
 			__ClearPageLRU(page);
@@ -1574,7 +1574,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	unsigned long nr_writeback = 0;
 	unsigned long nr_immediate = 0;
 	isolate_mode_t isolate_mode = 0;
-	int file = is_file_lru(lru);
+	int lruidx = lru_index(lru);
 	struct zone *zone = lruvec_zone(lruvec);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 
@@ -1599,7 +1599,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 				     &nr_scanned, sc, isolate_mode, lru);
 
 	__mod_zone_page_state(zone, NR_LRU_BASE + lru, -nr_taken);
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), nr_taken);
 
 	if (global_reclaim(sc)) {
 		__mod_zone_page_state(zone, NR_PAGES_SCANNED, nr_scanned);
@@ -1620,7 +1620,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	spin_lock_irq(&zone->lru_lock);
 
-	reclaim_stat->recent_scanned[file] += nr_taken;
+	reclaim_stat->recent_scanned[lruidx] += nr_taken;
 
 	if (global_reclaim(sc)) {
 		if (current_is_kswapd())
@@ -1633,7 +1633,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	putback_inactive_pages(lruvec, &page_list);
 
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, -nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), -nr_taken);
 
 	spin_unlock_irq(&zone->lru_lock);
 
@@ -1701,7 +1701,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		zone_idx(zone),
 		nr_scanned, nr_reclaimed,
 		sc->priority,
-		trace_shrink_flags(file));
+		trace_shrink_flags(lru));
 	return nr_reclaimed;
 }
 
@@ -1779,7 +1779,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 	unsigned long nr_rotated = 0;
 	isolate_mode_t isolate_mode = 0;
-	int file = is_file_lru(lru);
+	int lruidx = lru_index(lru);
 	struct zone *zone = lruvec_zone(lruvec);
 
 	lru_add_drain();
@@ -1796,11 +1796,11 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	if (global_reclaim(sc))
 		__mod_zone_page_state(zone, NR_PAGES_SCANNED, nr_scanned);
 
-	reclaim_stat->recent_scanned[file] += nr_taken;
+	reclaim_stat->recent_scanned[lruidx] += nr_taken;
 
 	__count_zone_vm_events(PGREFILL, zone, nr_scanned);
 	__mod_zone_page_state(zone, NR_LRU_BASE + lru, -nr_taken);
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), nr_taken);
 	spin_unlock_irq(&zone->lru_lock);
 
 	while (!list_empty(&l_hold)) {
@@ -1853,11 +1853,11 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	 * helps balance scan pressure between file and anonymous pages in
 	 * get_scan_count.
 	 */
-	reclaim_stat->recent_rotated[file] += nr_rotated;
+	reclaim_stat->recent_rotated[lru_index(lru)] += nr_rotated;
 
 	move_active_pages_to_lru(lruvec, &l_active, &l_hold, lru);
 	move_active_pages_to_lru(lruvec, &l_inactive, &l_hold, lru - LRU_ACTIVE);
-	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, -nr_taken);
+	__mod_zone_page_state(zone, lru_off_isolate(lru), -nr_taken);
 	spin_unlock_irq(&zone->lru_lock);
 
 	mem_cgroup_uncharge_list(&l_hold);
