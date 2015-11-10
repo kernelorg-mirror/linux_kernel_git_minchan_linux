@@ -611,13 +611,18 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 			    bool reclaimed)
 {
 	unsigned long flags;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
+	int expected = mapping ? 2 : 1;
 
 	BUG_ON(!PageLocked(page));
 	BUG_ON(mapping != page_mapping(page));
+	VM_BUG_ON_PAGE(mapping == NULL && !PageLazyFree(page), page);
 
-	memcg = mem_cgroup_begin_page_stat(page);
-	spin_lock_irqsave(&mapping->tree_lock, flags);
+	if (mapping) {
+		memcg = mem_cgroup_begin_page_stat(page);
+		spin_lock_irqsave(&mapping->tree_lock, flags);
+	}
+
 	/*
 	 * The non racy check for a busy page.
 	 *
@@ -643,13 +648,17 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 	 * Note that if SetPageDirty is always performed via set_page_dirty,
 	 * and thus under tree_lock, then this ordering is not required.
 	 */
-	if (!page_freeze_refs(page, 2))
+	if (!page_freeze_refs(page, expected))
 		goto cannot_free;
 	/* note: atomic_cmpxchg in page_freeze_refs provides the smp_rmb */
 	if (unlikely(PageDirty(page))) {
-		page_unfreeze_refs(page, 2);
+		page_unfreeze_refs(page, expected);
 		goto cannot_free;
 	}
+
+	/* No more work to do with backing store */
+	if (!mapping)
+		return 1;
 
 	if (PageSwapCache(page)) {
 		swp_entry_t swap = { .val = page_private(page) };
@@ -687,8 +696,10 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 	return 1;
 
 cannot_free:
-	spin_unlock_irqrestore(&mapping->tree_lock, flags);
-	mem_cgroup_end_page_stat(memcg);
+	if (mapping) {
+		spin_unlock_irqrestore(&mapping->tree_lock, flags);
+		mem_cgroup_end_page_stat(memcg);
+	}
 	return 0;
 }
 
@@ -1051,7 +1062,12 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (PageAnon(page) && !PageSwapCache(page)) {
 			if (!(sc->gfp_mask & __GFP_IO))
 				goto keep_locked;
-			if (!add_to_swap(page, page_list))
+			if (unlikely(PageTransHuge(page)) &&
+				unlikely(split_huge_page_to_list(page,
+						page_list)))
+				goto activate_locked;
+			if (total_swap_pages &&
+					!add_to_swap(page, page_list))
 				goto activate_locked;
 			if (ttu_flags & TTU_LZFREE)
 				freeable = true;
@@ -1065,7 +1081,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 * The page is mapped into the page tables of one or more
 		 * processes. Try to unmap it here.
 		 */
-		if (page_mapped(page) && mapping) {
+		if (page_mapped(page) && (mapping || freeable)) {
 			switch (try_to_unmap(page, freeable ?
 				(ttu_flags | TTU_BATCH_FLUSH) :
 				((ttu_flags & ~TTU_LZFREE) |
@@ -1182,7 +1198,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			}
 		}
 
-		if (!mapping || !__remove_mapping(mapping, page, true))
+		if ((!mapping && !freeable) ||
+			!__remove_mapping(mapping, page, true))
 			goto keep_locked;
 
 		/*
