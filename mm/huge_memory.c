@@ -1470,8 +1470,7 @@ int madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		goto out;
 
 	page = pmd_page(orig_pmd);
-	if (PageActive(page))
-		deactivate_page(page);
+	add_page_to_lazyfree_list(page);
 
 	if (pmd_young(orig_pmd) || pmd_dirty(orig_pmd)) {
 		orig_pmd = pmdp_huge_get_and_clear_full(tlb->mm, addr, pmd,
@@ -1787,6 +1786,7 @@ static void __split_huge_page_refcount(struct page *page,
 				      (1L << PG_mlocked) |
 				      (1L << PG_uptodate) |
 				      (1L << PG_active) |
+				      (1L << PG_lazyfree) |
 				      (1L << PG_unevictable) |
 				      (1L << PG_dirty)));
 

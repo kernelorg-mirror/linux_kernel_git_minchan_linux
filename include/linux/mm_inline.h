@@ -26,6 +26,10 @@ static __always_inline void add_page_to_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
 	int nr_pages = hpage_nr_pages(page);
+
+	if (lru == LRU_LZFREE)
+		VM_BUG_ON_PAGE(PageActive(page), page);
+
 	mem_cgroup_update_lru_size(lruvec, lru, nr_pages);
 	list_add(&page->lru, &lruvec->lists[lru]);
 	__mod_zone_page_state(lruvec_zone(lruvec), NR_LRU_BASE + lru, nr_pages);
@@ -35,6 +39,10 @@ static __always_inline void del_page_from_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
 	int nr_pages = hpage_nr_pages(page);
+
+	if (lru == LRU_LZFREE)
+		VM_BUG_ON_PAGE(!PageLazyFree(page), page);
+
 	mem_cgroup_update_lru_size(lruvec, lru, -nr_pages);
 	list_del(&page->lru);
 	__mod_zone_page_state(lruvec_zone(lruvec), NR_LRU_BASE + lru, -nr_pages);
@@ -46,12 +54,14 @@ static __always_inline void del_page_from_lru_list(struct page *page,
  *
  * Used for LRU list index arithmetic.
  *
- * Returns the base LRU type - file or anon - @page should be on.
+ * Returns the base LRU type - file or anon or lazyfree - @page should be on.
  */
 static inline enum lru_list page_lru_base_type(struct page *page)
 {
 	if (page_is_file_cache(page))
 		return LRU_INACTIVE_FILE;
+	if (PageLazyFree(page))
+		return LRU_LZFREE;
 	return LRU_INACTIVE_ANON;
 }
 
@@ -60,7 +70,7 @@ static inline enum lru_list page_lru_base_type(struct page *page)
  *
  * Used for LRU list index arithmetic.
  *
- * Returns 0 if @lru is anon, 1 if it is file.
+ * Returns 0 if @lru is anon, 1 if it is file, 2 if it is lazyfree
  */
 static inline int lru_index(enum lru_list lru)
 {
@@ -74,6 +84,9 @@ static inline int lru_index(enum lru_list lru)
 	case LRU_INACTIVE_FILE:
 	case LRU_ACTIVE_FILE:
 		base = 1;
+		break;
+	case LRU_LZFREE:
+		base = 2;
 		break;
 	default:
 		BUG();
@@ -90,10 +103,12 @@ static inline int lru_index(enum lru_list lru)
  */
 static inline int page_off_isolate(struct page *page)
 {
-	int lru = NR_ISOLATED_ANON;
+	int lru = NR_ISOLATED_LZFREE;
 
 	if (!PageSwapBacked(page))
 		lru = NR_ISOLATED_FILE;
+	else if (PageLazyFree(page))
+		lru = NR_ISOLATED_LZFREE;
 	return lru;
 }
 
@@ -106,10 +121,12 @@ static inline int page_off_isolate(struct page *page)
  */
 static inline int lru_off_isolate(enum lru_list lru)
 {
-	int base = NR_ISOLATED_FILE;
+	int base = NR_ISOLATED_LZFREE;
 
 	if (lru <= LRU_ACTIVE_ANON)
 		base = NR_ISOLATED_ANON;
+	else if (lru <= LRU_ACTIVE_FILE)
+		base = NR_ISOLATED_FILE;
 	return base;
 }
 

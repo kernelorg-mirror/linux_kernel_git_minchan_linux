@@ -109,6 +109,7 @@ static const char * const mem_cgroup_lru_names[] = {
 	"inactive_file",
 	"active_file",
 	"unevictable",
+	"lazyfree",
 };
 
 #define THRESHOLDS_EVENTS_TARGET 128
@@ -1402,6 +1403,8 @@ unlock:
 static bool test_mem_cgroup_node_reclaimable(struct mem_cgroup *memcg,
 		int nid, bool noswap)
 {
+	if (mem_cgroup_node_nr_lru_pages(memcg, nid, LRU_ALL_LZFREE))
+		return true;
 	if (mem_cgroup_node_nr_lru_pages(memcg, nid, LRU_ALL_FILE))
 		return true;
 	if (noswap || !total_swap_pages)
@@ -3120,6 +3123,7 @@ static int memcg_numa_stat_show(struct seq_file *m, void *v)
 		{ "total", LRU_ALL },
 		{ "file", LRU_ALL_FILE },
 		{ "anon", LRU_ALL_ANON },
+		{ "lazyfree", LRU_ALL_LZFREE },
 		{ "unevictable", BIT(LRU_UNEVICTABLE) },
 	};
 	const struct numa_stat *stat;
@@ -3231,8 +3235,8 @@ static int memcg_stat_show(struct seq_file *m, void *v)
 		int nid, zid;
 		struct mem_cgroup_per_zone *mz;
 		struct zone_reclaim_stat *rstat;
-		unsigned long recent_rotated[2] = {0, 0};
-		unsigned long recent_scanned[2] = {0, 0};
+		unsigned long recent_rotated[3] = {0, 0};
+		unsigned long recent_scanned[3] = {0, 0};
 
 		for_each_online_node(nid)
 			for (zid = 0; zid < MAX_NR_ZONES; zid++) {
@@ -3241,13 +3245,19 @@ static int memcg_stat_show(struct seq_file *m, void *v)
 
 				recent_rotated[0] += rstat->recent_rotated[0];
 				recent_rotated[1] += rstat->recent_rotated[1];
+				recent_rotated[2] += rstat->recent_rotated[2];
 				recent_scanned[0] += rstat->recent_scanned[0];
 				recent_scanned[1] += rstat->recent_scanned[1];
+				recent_scanned[2] += rstat->recent_scanned[2];
 			}
 		seq_printf(m, "recent_rotated_anon %lu\n", recent_rotated[0]);
 		seq_printf(m, "recent_rotated_file %lu\n", recent_rotated[1]);
+		seq_printf(m, "recent_rotated_lzfree %lu\n",
+						recent_rotated[2]);
 		seq_printf(m, "recent_scanned_anon %lu\n", recent_scanned[0]);
 		seq_printf(m, "recent_scanned_file %lu\n", recent_scanned[1]);
+		seq_printf(m, "recent_scanned_lzfree %lu\n",
+						recent_scanned[2]);
 	}
 #endif
 

@@ -72,7 +72,8 @@ static unsigned long lowmem_count(struct shrinker *s,
 	return global_page_state(NR_ACTIVE_ANON) +
 		global_page_state(NR_ACTIVE_FILE) +
 		global_page_state(NR_INACTIVE_ANON) +
-		global_page_state(NR_INACTIVE_FILE);
+		global_page_state(NR_INACTIVE_FILE) +
+		global_page_state(NR_LZFREE);
 }
 
 static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)

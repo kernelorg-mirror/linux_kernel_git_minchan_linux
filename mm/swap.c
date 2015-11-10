@@ -45,6 +45,7 @@ int page_cluster;
 static DEFINE_PER_CPU(struct pagevec, lru_add_pvec);
 static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);
 static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
+static DEFINE_PER_CPU(struct pagevec, lru_lazyfree_pvecs);
 
 /*
  * This path almost never happens for VM activity - pages are normally
@@ -507,6 +508,10 @@ static void __activate_page(struct page *page, struct lruvec *lruvec,
 
 		del_page_from_lru_list(page, lruvec, lru);
 		SetPageActive(page);
+		if (lru == LRU_LZFREE) {
+			ClearPageLazyFree(page);
+			lru = LRU_INACTIVE_ANON;
+		}
 		lru += LRU_ACTIVE;
 		add_page_to_lru_list(page, lruvec, lru);
 		trace_mm_lru_activate(page);
@@ -767,6 +772,9 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 	active = PageActive(page);
 	lru = page_lru_base_type(page);
 
+	if (lru == LRU_LZFREE)
+		return;
+
 	if (!file && !active)
 		return;
 
@@ -803,6 +811,29 @@ out:
 	update_page_reclaim_stat(lruvec, lru_index(lru), 0);
 }
 
+static void lru_lazyfree_fn(struct page *page, struct lruvec *lruvec,
+		void *arg)
+{
+	VM_BUG_ON_PAGE(!PageAnon(page), page);
+
+	if (PageLRU(page) && !PageLazyFree(page) &&
+				!PageUnevictable(page)) {
+		unsigned int nr_pages = 1;
+		bool active = PageActive(page);
+
+		del_page_from_lru_list(page, lruvec,
+				LRU_INACTIVE_ANON + active);
+		ClearPageActive(page);
+		SetPageLazyFree(page);
+		add_page_to_lru_list(page, lruvec, LRU_LZFREE);
+
+		if (PageTransHuge(page))
+			nr_pages = HPAGE_PMD_NR;
+		count_vm_events(PGLZFREE, nr_pages);
+		update_page_reclaim_stat(lruvec, 2, 0);
+	}
+}
+
 /*
  * Drain pages out of the cpu's pagevecs.
  * Either "cpu" is the current CPU, and preemption has already been
@@ -829,7 +860,23 @@ void lru_add_drain_cpu(int cpu)
 	if (pagevec_count(pvec))
 		pagevec_lru_move_fn(pvec, lru_deactivate_fn, NULL);
 
+	pvec = &per_cpu(lru_lazyfree_pvecs, cpu);
+	if (pagevec_count(pvec))
+		pagevec_lru_move_fn(pvec, lru_lazyfree_fn, NULL);
+
 	activate_page_drain(cpu);
+}
+
+void add_page_to_lazyfree_list(struct page *page)
+{
+	if (PageLRU(page) && !PageLazyFree(page) && !PageUnevictable(page)) {
+		struct pagevec *pvec = &get_cpu_var(lru_lazyfree_pvecs);
+
+		page_cache_get(page);
+		if (!pagevec_add(pvec, page))
+			pagevec_lru_move_fn(pvec, lru_lazyfree_fn, NULL);
+		put_cpu_var(lru_lazyfree_pvecs);
+	}
 }
 
 /**
@@ -890,6 +937,7 @@ void lru_add_drain_all(void)
 		if (pagevec_count(&per_cpu(lru_add_pvec, cpu)) ||
 		    pagevec_count(&per_cpu(lru_rotate_pvecs, cpu)) ||
 		    pagevec_count(&per_cpu(lru_deactivate_pvecs, cpu)) ||
+		    pagevec_count(&per_cpu(lru_lazyfree_pvecs, cpu)) ||
 		    need_activate_page_drain(cpu)) {
 			INIT_WORK(work, lru_add_drain_per_cpu);
 			schedule_work_on(cpu, work);

@@ -197,7 +197,8 @@ static unsigned long zone_reclaimable_pages(struct zone *zone)
 	int nr;
 
 	nr = zone_page_state(zone, NR_ACTIVE_FILE) +
-	     zone_page_state(zone, NR_INACTIVE_FILE);
+		zone_page_state(zone, NR_INACTIVE_FILE) +
+		zone_page_state(zone, NR_LZFREE);
 
 	if (get_nr_swap_pages() > 0)
 		nr += zone_page_state(zone, NR_ACTIVE_ANON) +
@@ -918,6 +919,8 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 
 		VM_BUG_ON_PAGE(PageActive(page), page);
 		VM_BUG_ON_PAGE(page_zone(page) != zone, page);
+		VM_BUG_ON_PAGE((ttu_flags & TTU_LZFREE) &&
+				!PageLazyFree(page), page);
 
 		sc->nr_scanned++;
 
@@ -1050,7 +1053,16 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				goto keep_locked;
 			if (!add_to_swap(page, page_list))
 				goto activate_locked;
-			freeable = true;
+			if (ttu_flags & TTU_LZFREE) {
+				freeable = true;
+			} else {
+				/*
+				 * anon-LRU list can have !PG_dirty &&
+				 * !PG_swapcache && clean pte until
+				 * lru_lazyfree_pvec is flushed.
+				 */
+				SetPageDirty(page);
+			}
 			may_enter_fs = 1;
 
 			/* Adding to swap updated mapping */
@@ -1063,8 +1075,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		 */
 		if (page_mapped(page) && mapping) {
 			switch (try_to_unmap(page, freeable ?
-				(ttu_flags | TTU_BATCH_FLUSH | TTU_FREE) :
-				(ttu_flags | TTU_BATCH_FLUSH))) {
+				(ttu_flags | TTU_BATCH_FLUSH) :
+				((ttu_flags & ~TTU_LZFREE) |
+						TTU_BATCH_FLUSH))) {
 			case SWAP_FAIL:
 				goto activate_locked;
 			case SWAP_AGAIN:
@@ -1190,7 +1203,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		__clear_page_locked(page);
 free_it:
 		if (freeable && !PageDirty(page))
-			count_vm_event(PGLAZYFREED);
+			count_vm_event(PGLZFREED);
 
 		nr_reclaimed++;
 
@@ -1458,7 +1471,7 @@ int isolate_lru_page(struct page *page)
  * the LRU list will go small and be scanned faster than necessary, leading to
  * unnecessary swapping, thrashing and OOM.
  */
-static int too_many_isolated(struct zone *zone, int file,
+static int too_many_isolated(struct zone *zone, int lru_index,
 		struct scan_control *sc)
 {
 	unsigned long inactive, isolated;
@@ -1469,12 +1482,21 @@ static int too_many_isolated(struct zone *zone, int file,
 	if (!sane_reclaim(sc))
 		return 0;
 
-	if (file) {
-		inactive = zone_page_state(zone, NR_INACTIVE_FILE);
-		isolated = zone_page_state(zone, NR_ISOLATED_FILE);
-	} else {
+	switch (lru_index) {
+	case 0:
 		inactive = zone_page_state(zone, NR_INACTIVE_ANON);
 		isolated = zone_page_state(zone, NR_ISOLATED_ANON);
+		break;
+	case 1:
+		inactive = zone_page_state(zone, NR_INACTIVE_FILE);
+		isolated = zone_page_state(zone, NR_ISOLATED_FILE);
+		break;
+	case 2:
+		inactive = zone_page_state(zone, NR_LZFREE);
+		isolated = zone_page_state(zone, NR_ISOLATED_LZFREE);
+		break;
+	default:
+		BUG();
 	}
 
 	/*
@@ -1515,6 +1537,10 @@ putback_inactive_pages(struct lruvec *lruvec, struct list_head *page_list)
 
 		SetPageLRU(page);
 		lru = page_lru(page);
+		if (lru == LRU_LZFREE + LRU_ACTIVE) {
+			ClearPageLazyFree(page);
+			lru = LRU_ACTIVE_ANON;
+		}
 		add_page_to_lru_list(page, lruvec, lru);
 
 		if (is_active_lru(lru)) {
@@ -1578,7 +1604,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	struct zone *zone = lruvec_zone(lruvec);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 
-	while (unlikely(too_many_isolated(zone, file, sc))) {
+	while (unlikely(too_many_isolated(zone, lru_index(lru), sc))) {
 		congestion_wait(BLK_RW_ASYNC, HZ/10);
 
 		/* We are about to die and free our memory. Return now. */
@@ -1613,7 +1639,10 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	if (nr_taken == 0)
 		return 0;
 
-	nr_reclaimed = shrink_page_list(&page_list, zone, sc, TTU_UNMAP,
+	nr_reclaimed = shrink_page_list(&page_list, zone, sc,
+				(lru != LRU_LZFREE) ?
+				TTU_UNMAP :
+				TTU_UNMAP|TTU_LZFREE,
 				&nr_dirty, &nr_unqueued_dirty, &nr_congested,
 				&nr_writeback, &nr_immediate,
 				false);
@@ -1701,7 +1730,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		zone_idx(zone),
 		nr_scanned, nr_reclaimed,
 		sc->priority,
-		trace_shrink_flags(lru));
+		trace_shrink_flags(lru_index(lru)));
 	return nr_reclaimed;
 }
 
@@ -2194,6 +2223,7 @@ static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
 	unsigned long nr[NR_LRU_LISTS];
 	unsigned long targets[NR_LRU_LISTS];
 	unsigned long nr_to_scan;
+	unsigned long nr_to_scan_lzfree;
 	enum lru_list lru;
 	unsigned long nr_reclaimed = 0;
 	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
@@ -2204,6 +2234,7 @@ static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
 
 	/* Record the original scan target for proportional adjustments later */
 	memcpy(targets, nr, sizeof(nr));
+	nr_to_scan_lzfree = get_lru_size(lruvec, LRU_LZFREE);
 
 	/*
 	 * Global reclaiming within direct reclaim at DEF_PRIORITY is a normal
@@ -2220,6 +2251,19 @@ static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
 			 sc->priority == DEF_PRIORITY);
 
 	init_tlb_ubc();
+
+	while (nr_to_scan_lzfree) {
+		nr_to_scan = min(nr_to_scan_lzfree, SWAP_CLUSTER_MAX);
+		nr_to_scan_lzfree -= nr_to_scan;
+
+		nr_reclaimed += shrink_inactive_list(nr_to_scan, lruvec,
+						sc, LRU_LZFREE);
+	}
+
+	if (nr_reclaimed >= nr_to_reclaim) {
+		sc->nr_reclaimed += nr_reclaimed;
+		return;
+	}
 
 	blk_start_plug(&plug);
 	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
@@ -2364,6 +2408,7 @@ static inline bool should_continue_reclaim(struct zone *zone,
 	 */
 	pages_for_compaction = (2UL << sc->order);
 	inactive_lru_pages = zone_page_state(zone, NR_INACTIVE_FILE);
+	inactive_lru_pages += zone_page_state(zone, NR_LZFREE);
 	if (get_nr_swap_pages() > 0)
 		inactive_lru_pages += zone_page_state(zone, NR_INACTIVE_ANON);
 	if (sc->nr_reclaimed < pages_for_compaction &&

@@ -12,28 +12,32 @@
 
 #define RECLAIM_WB_ANON		0x0001u
 #define RECLAIM_WB_FILE		0x0002u
+#define RECLAIM_WB_LZFREE	0x0004u
 #define RECLAIM_WB_MIXED	0x0010u
-#define RECLAIM_WB_SYNC		0x0004u /* Unused, all reclaim async */
-#define RECLAIM_WB_ASYNC	0x0008u
+#define RECLAIM_WB_SYNC		0x0040u /* Unused, all reclaim async */
+#define RECLAIM_WB_ASYNC	0x0080u
 
 #define show_reclaim_flags(flags)				\
 	(flags) ? __print_flags(flags, "|",			\
 		{RECLAIM_WB_ANON,	"RECLAIM_WB_ANON"},	\
 		{RECLAIM_WB_FILE,	"RECLAIM_WB_FILE"},	\
+		{RECLAIM_WB_LZFREE,	"RECLAIM_WB_LZFREE"},	\
 		{RECLAIM_WB_MIXED,	"RECLAIM_WB_MIXED"},	\
 		{RECLAIM_WB_SYNC,	"RECLAIM_WB_SYNC"},	\
 		{RECLAIM_WB_ASYNC,	"RECLAIM_WB_ASYNC"}	\
 		) : "RECLAIM_WB_NONE"
 
 #define trace_reclaim_flags(page) ( \
-	(page_is_file_cache(page) ? RECLAIM_WB_FILE : RECLAIM_WB_ANON) | \
-	(RECLAIM_WB_ASYNC) \
+	(page_is_file_cache(page) ? RECLAIM_WB_FILE : \
+		(PageLazyFree(page) ? RECLAIM_WB_LZFREE : \
+		RECLAIM_WB_ANON)) | (RECLAIM_WB_ASYNC) \
 	)
 
-#define trace_shrink_flags(lru) \
+#define trace_shrink_flags(lru_idx) \
 	( \
-		(lru ? RECLAIM_WB_FILE : RECLAIM_WB_ANON) | \
-		(RECLAIM_WB_ASYNC) \
+		(lru_idx == 1 ? RECLAIM_WB_FILE : (lru_idx == 0 ? \
+			RECLAIM_WB_ANON : RECLAIM_WB_LZFREE)) | \
+			(RECLAIM_WB_ASYNC) \
 	)
 
 TRACE_EVENT(mm_vmscan_kswapd_sleep,

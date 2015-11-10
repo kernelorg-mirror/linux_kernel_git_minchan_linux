@@ -704,6 +704,7 @@ const char * const vmstat_text[] = {
 	"nr_inactive_file",
 	"nr_active_file",
 	"nr_unevictable",
+	"nr_lazyfree",
 	"nr_mlock",
 	"nr_anon_pages",
 	"nr_mapped",
@@ -721,6 +722,7 @@ const char * const vmstat_text[] = {
 	"nr_writeback_temp",
 	"nr_isolated_anon",
 	"nr_isolated_file",
+	"nr_isolated_lazyfree",
 	"nr_shmem",
 	"nr_dirtied",
 	"nr_written",
@@ -756,6 +758,7 @@ const char * const vmstat_text[] = {
 	"pgfree",
 	"pgactivate",
 	"pgdeactivate",
+	"pglazyfree",
 
 	"pgfault",
 	"pgmajfault",

@@ -115,6 +115,9 @@ enum pageflags {
 #endif
 	__NR_PAGEFLAGS,
 
+	/* MADV_FREE */
+	PG_lazyfree = PG_mappedtodisk,
+
 	/* Filesystems */
 	PG_checked = PG_owner_priv_1,
 
@@ -342,6 +345,8 @@ TESTPAGEFLAG_FALSE(Ksm)
 #endif
 
 u64 stable_page_flags(struct page *page);
+
+PAGEFLAG(LazyFree, lazyfree);
 
 static inline int PageUptodate(struct page *page)
 {
