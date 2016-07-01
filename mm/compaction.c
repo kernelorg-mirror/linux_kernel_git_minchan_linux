@@ -1122,7 +1122,7 @@ static void isolate_freepages(struct compact_control *cc)
 			 * isolate_freepages_block() should not terminate
 			 * prematurely unless contended, or isolated enough
 			 */
-			VM_BUG_ON(isolate_start_pfn < block_end_pfn);
+			// VM_BUG_ON(isolate_start_pfn < block_end_pfn);
 		}
 	}
 
