@@ -244,6 +244,7 @@ config BALLOON_COMPACTION
 	bool "Allow for balloon memory compaction/migration"
 	def_bool y
 	depends on COMPACTION && MEMORY_BALLOON
+	select MOVABLE_INODES
 	help
 	  Memory fragmentation introduced by ballooning might reduce
 	  significantly the number of 2MB contiguous memory blocks that can be

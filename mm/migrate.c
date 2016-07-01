@@ -926,7 +926,6 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	int rc = -EAGAIN;
 	int page_was_mapped = 0;
 	struct anon_vma *anon_vma = NULL;
-	bool is_lru = !__PageMovable(page);
 
 	if (!trylock_page(page)) {
 		if (!force || mode == MIGRATE_ASYNC)
@@ -994,11 +993,6 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	 */
 	if (unlikely(!trylock_page(newpage)))
 		goto out_unlock;
-
-	if (unlikely(!is_lru)) {
-		rc = move_to_new_page(newpage, page, mode);
-		goto out_unlock_both;
-	}
 
 	/*
 	 * Corner case handling:

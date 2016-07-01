@@ -1335,6 +1335,9 @@ config SYSCTL
 config ANON_INODES
 	bool
 
+config MOVABLE_INODES
+	bool
+
 config HAVE_UID16
 	bool
 
