@@ -120,7 +120,7 @@ bool balloon_page_isolate(struct page *page, isolate_mode_t mode)
 	return true;
 }
 
-void balloon_page_putback(struct page *page)
+bool balloon_page_putback(struct page *page)
 {
 	struct balloon_dev_info *b_dev_info = balloon_page_device(page);
 	unsigned long flags;
@@ -129,6 +129,8 @@ void balloon_page_putback(struct page *page)
 	list_add(&page->lru, &b_dev_info->pages);
 	b_dev_info->isolated_pages--;
 	spin_unlock_irqrestore(&b_dev_info->pages_lock, flags);
+
+	return true;
 }
 
 

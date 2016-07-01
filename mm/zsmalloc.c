@@ -2130,7 +2130,7 @@ unlock_class:
 	return ret;
 }
 
-void zs_page_putback(struct page *page)
+bool zs_page_putback(struct page *page)
 {
 	struct zs_pool *pool;
 	struct size_class *class;
@@ -2160,6 +2160,8 @@ void zs_page_putback(struct page *page)
 			schedule_work(&pool->free_work);
 	}
 	spin_unlock(&class->lock);
+
+	return true;
 }
 
 const struct address_space_operations zsmalloc_aops = {

@@ -82,7 +82,7 @@ static inline void balloon_devinfo_init(struct balloon_dev_info *balloon)
 extern const struct address_space_operations balloon_aops;
 extern bool balloon_page_isolate(struct page *page,
 				isolate_mode_t mode);
-extern void balloon_page_putback(struct page *page);
+extern bool balloon_page_putback(struct page *page);
 extern int balloon_page_migrate(struct address_space *mapping,
 				struct page *newpage,
 				struct page *page, enum migrate_mode mode);
@@ -175,9 +175,9 @@ static inline bool balloon_page_isolate(struct page *page)
 	return false;
 }
 
-static inline void balloon_page_putback(struct page *page)
+static inline bool balloon_page_putback(struct page *page)
 {
-	return;
+	return false;
 }
 
 static inline int balloon_page_migrate(struct page *newpage,

@@ -139,13 +139,22 @@ out:
 void putback_movable_page(struct page *page)
 {
 	VM_BUG_ON_PAGE(!PageIsolated(page), page);
-
+retry:
 	lock_page(page);
 	if (PageMovable(page)) {
 		struct address_space *mapping;
 
 		mapping = page_mapping(page);
-		mapping->a_ops->putback_page(page);
+		/*
+		 * A driver cannot put the page back(normally,
+		 * it would be locking order problem), just
+		 * relese the page.lock and retry it.
+		 */
+		if (!mapping->a_ops->putback_page(page)) {
+			unlock_page(page);
+			cond_resched();
+			goto retry;
+		}
 	}
 
 	__ClearPageIsolated(page);

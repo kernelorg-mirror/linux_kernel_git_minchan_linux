@@ -190,12 +190,14 @@ in this time.
 
 Driver shouldn't touch page.lru field VM using in the functions.
 
-3. void (*putback_page)(struct page *);
+3. bool (*putback_page)(struct page *);
 
 If migration fails on isolated page, VM should return the isolated page
 to the driver so VM calls driver's putback_page with migration failed page.
 In this function, driver should put the isolated page back to the own data
-structure.
+structure and return true. If driver cannot put the page back by some
+reason(for example, to avoid deadlock due to lock ordering by page.lock
+and driver.lock), it can return false. Then, VM will retry it after a while.
 
 4. non-lru movable page flags
 
