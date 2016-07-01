@@ -138,15 +138,19 @@ out:
 /* It should be called on page which is PG_movable */
 void putback_movable_page(struct page *page)
 {
-	struct address_space *mapping;
-
-	VM_BUG_ON_PAGE(!PageLocked(page), page);
-	VM_BUG_ON_PAGE(!PageMovable(page), page);
 	VM_BUG_ON_PAGE(!PageIsolated(page), page);
 
-	mapping = page_mapping(page);
-	mapping->a_ops->putback_page(page);
+	lock_page(page);
+	if (PageMovable(page)) {
+		struct address_space *mapping;
+
+		mapping = page_mapping(page);
+		mapping->a_ops->putback_page(page);
+	}
+
 	__ClearPageIsolated(page);
+	unlock_page(page);
+	put_page(page);
 }
 
 /*
@@ -175,18 +179,10 @@ void putback_movable_pages(struct list_head *l)
 		 * __PageMovable because LRU page's mapping cannot have
 		 * PAGE_MAPPING_MOVABLE.
 		 */
-		if (unlikely(__PageMovable(page))) {
-			VM_BUG_ON_PAGE(!PageIsolated(page), page);
-			lock_page(page);
-			if (PageMovable(page))
-				putback_movable_page(page);
-			else
-				__ClearPageIsolated(page);
-			unlock_page(page);
-			put_page(page);
-		} else {
+		if (unlikely(__PageMovable(page)))
+			putback_movable_page(page);
+		else
 			putback_lru_page(page);
-		}
 	}
 }
 
@@ -1146,13 +1142,7 @@ out:
 				goto put_new;
 			}
 
-			lock_page(page);
-			if (PageMovable(page))
-				putback_movable_page(page);
-			else
-				__ClearPageIsolated(page);
-			unlock_page(page);
-			put_page(page);
+			putback_movable_page(page);
 		}
 put_new:
 		if (put_new_page)
