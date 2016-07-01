@@ -131,7 +131,7 @@ enum pageflags {
 	PG_double_map = PG_private_2,
 
 	/* non-lru isolated movable page */
-	PG_isolated = PG_reclaim,
+	PG_isolated = PG_mappedtodisk,
 };
 
 #ifndef __GENERATING_BOUNDS_H
