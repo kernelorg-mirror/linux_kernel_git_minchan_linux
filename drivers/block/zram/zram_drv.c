@@ -872,7 +872,7 @@ static int zram_bvec_rw(struct zram *zram, struct bio_vec *bvec, u32 index,
 	return ret;
 }
 
-static void __zram_make_request(struct zram *zram, struct bio *bio)
+static void __zram_make_sync_request(struct zram *zram, struct bio *bio)
 {
 	int offset;
 	u32 index;
@@ -882,12 +882,6 @@ static void __zram_make_request(struct zram *zram, struct bio *bio)
 	index = bio->bi_iter.bi_sector >> SECTORS_PER_PAGE_SHIFT;
 	offset = (bio->bi_iter.bi_sector &
 		  (SECTORS_PER_PAGE - 1)) << SECTOR_SHIFT;
-
-	if (unlikely(bio_op(bio) == REQ_OP_DISCARD)) {
-		zram_bio_discard(zram, index, offset, bio);
-		bio_endio(bio);
-		return;
-	}
 
 	bio_for_each_segment(bvec, bio, iter) {
 		int max_transfer_size = PAGE_SIZE - offset;
@@ -921,10 +915,12 @@ static void __zram_make_request(struct zram *zram, struct bio *bio)
 	}
 
 	bio_endio(bio);
+	zram_meta_put(zram);
 	return;
 
 out:
 	bio_io_error(bio);
+	zram_meta_put(zram);
 }
 
 /*
@@ -945,8 +941,21 @@ static blk_qc_t zram_make_request(struct request_queue *queue, struct bio *bio)
 		goto put_zram;
 	}
 
-	__zram_make_request(zram, bio);
-	zram_meta_put(zram);
+	if (unlikely(bio_op(bio) == REQ_OP_DISCARD)) {
+		int offset;
+		u32 index;
+
+		index = bio->bi_iter.bi_sector >> SECTORS_PER_PAGE_SHIFT;
+		offset = (bio->bi_iter.bi_sector &
+				(SECTORS_PER_PAGE - 1)) << SECTOR_SHIFT;
+		zram_bio_discard(zram, index, offset, bio);
+		bio_endio(bio);
+		zram_meta_put(zram);
+		goto out;
+	}
+
+	__zram_make_sync_request(zram, bio);
+out:
 	return BLK_QC_T_NONE;
 put_zram:
 	zram_meta_put(zram);
@@ -970,6 +979,29 @@ static void zram_slot_free_notify(struct block_device *bdev,
 	atomic64_inc(&zram->stats.notify_free);
 }
 
+static int zram_rw_sync_page(struct block_device *bdev, struct zram *zram,
+				struct bio_vec *bv, u32 index,
+				int offset, bool is_write)
+{
+	int err;
+
+	err = zram_bvec_rw(zram, bv, index, offset, is_write);
+	/*
+	 * If I/O fails, just return error(ie, non-zero) without
+	 * calling page_endio.
+	 * It causes resubmit the I/O with bio request by upper functions
+	 * of rw_page(e.g., swap_readpage, __swap_writepage) and
+	 * bio->bi_end_io does things to handle the error
+	 * (e.g., SetPageError, set_page_dirty and extra works).
+	 */
+	if (err == 0)
+		page_endio(bv->bv_page, is_write, 0);
+
+	zram_meta_put(zram);
+
+	return err;
+}
+
 static int zram_rw_page(struct block_device *bdev, sector_t sector,
 		       struct page *page, bool is_write)
 {
@@ -980,35 +1012,24 @@ static int zram_rw_page(struct block_device *bdev, sector_t sector,
 
 	zram = bdev->bd_disk->private_data;
 	if (unlikely(!zram_meta_get(zram)))
-		goto out;
+		return err;
 
 	if (!valid_io_request(zram, sector, PAGE_SIZE)) {
 		atomic64_inc(&zram->stats.invalid_io);
 		err = -EINVAL;
-		goto put_zram;
+		zram_meta_put(zram);
+		return err;
 	}
 
 	index = sector >> SECTORS_PER_PAGE_SHIFT;
-	offset = sector & (SECTORS_PER_PAGE - 1) << SECTOR_SHIFT;
+	offset = (sector & (SECTORS_PER_PAGE - 1)) << SECTOR_SHIFT;
 
 	bv.bv_page = page;
 	bv.bv_len = PAGE_SIZE;
 	bv.bv_offset = 0;
 
-	err = zram_bvec_rw(zram, &bv, index, offset, is_write);
-put_zram:
-	zram_meta_put(zram);
-out:
-	/*
-	 * If I/O fails, just return error(ie, non-zero) without
-	 * calling page_endio.
-	 * It causes resubmit the I/O with bio request by upper functions
-	 * of rw_page(e.g., swap_readpage, __swap_writepage) and
-	 * bio->bi_end_io does things to handle the error
-	 * (e.g., SetPageError, set_page_dirty and extra works).
-	 */
-	if (err == 0)
-		page_endio(page, is_write, 0);
+	err = zram_rw_sync_page(bdev, zram, &bv, index, offset, is_write);
+
 	return err;
 }
 
