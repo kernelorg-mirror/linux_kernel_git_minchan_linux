@@ -31,6 +31,7 @@
 #include <linux/err.h>
 #include <linux/idr.h>
 #include <linux/sysfs.h>
+#include <linux/cpu.h>
 
 #include "zram_drv.h"
 
@@ -987,6 +988,8 @@ struct zram_workers {
 	struct list_head worker_list;
 	wait_queue_head_t req_wait;
 	spinlock_t req_lock;
+
+	struct notifier_block notifier;
 } workers;
 
 struct bio_request {
@@ -1269,52 +1272,97 @@ static int zram_thread(void *data)
 	return 0;
 }
 
-static void destroy_workers(void)
+static int __zram_cpu_notifier(void *dummy, unsigned long action,
+				unsigned long cpu)
 {
 	struct zram_worker *worker;
 
-	while (!list_empty(&workers.worker_list)) {
+	switch (action) {
+	case CPU_UP_PREPARE:
+		worker = kmalloc(sizeof(*worker), GFP_KERNEL);
+		if (!worker) {
+			pr_err("Can't allocate a worker\n");
+			return NOTIFY_BAD;
+		}
+
+		worker->task = kthread_run(zram_thread, NULL, "zramd-%lu", cpu);
+		if (IS_ERR(worker->task)) {
+			kfree(worker);
+			pr_err("Can't allocate a zram thread\n");
+			return NOTIFY_BAD;
+		}
+
+		spin_lock(&workers.req_lock);
+		list_add(&worker->list, &workers.worker_list);
+		spin_unlock(&workers.req_lock);
+		break;
+	case CPU_DEAD:
+	case CPU_UP_CANCELED:
+		spin_lock(&workers.req_lock);
+		WARN_ON(list_empty(&workers.worker_list));
+
 		worker = list_first_entry(&workers.worker_list,
-				struct zram_worker,
-				list);
-		kthread_stop(worker->task);
+					struct zram_worker, list);
 		list_del(&worker->list);
+		spin_unlock(&workers.req_lock);
+
+		kthread_stop(worker->task);
 		kfree(worker);
+		break;
+	default:
+		break;
 	}
+	return NOTIFY_OK;
+}
+
+static int zram_cpu_notifier(struct notifier_block *nb,
+		unsigned long action, void *pcpu)
+{
+	unsigned long cpu = (unsigned long)pcpu;
+
+	return __zram_cpu_notifier(NULL, action, cpu);
+}
+
+static void destroy_workers(void)
+{
+	unsigned long cpu;
+
+	cpu_notifier_register_begin();
+	for_each_online_cpu(cpu)
+		__zram_cpu_notifier(NULL, CPU_UP_CANCELED, cpu);
+	__unregister_cpu_notifier(&workers.notifier);
+	cpu_notifier_register_done();
 
 	WARN_ON(workers.nr_running);
 }
 
 static int create_workers(void)
 {
-	int i;
-	int nr_cpu = num_online_cpus();
-	struct zram_worker *worker;
+	int cpu;
 
 	INIT_LIST_HEAD(&workers.worker_list);
 	INIT_LIST_HEAD(&workers.req_list);
 	spin_lock_init(&workers.req_lock);
 	init_waitqueue_head(&workers.req_wait);
 
-	for (i = 0; i < nr_cpu; i++) {
-		worker = kmalloc(sizeof(*worker), GFP_KERNEL);
-		if (!worker)
-			goto error;
-
-		worker->task = kthread_run(zram_thread, NULL, "zramd-%d", i);
-		if (IS_ERR(worker->task)) {
-			kfree(worker);
-			goto error;
-		}
-
-		list_add(&worker->list, &workers.worker_list);
+	workers.notifier.notifier_call = zram_cpu_notifier;
+	cpu_notifier_register_begin();
+	for_each_online_cpu(cpu) {
+		if (__zram_cpu_notifier(NULL, CPU_UP_PREPARE, cpu) ==
+				NOTIFY_BAD)
+			goto cleanup;
 	}
 
-	return 0;
+	__register_cpu_notifier(&workers.notifier);
+	cpu_notifier_register_done();
 
-error:
-	destroy_workers();
-	return 1;
+	return 0;
+cleanup:
+	for_each_online_cpu(cpu)
+		__zram_cpu_notifier(NULL, CPU_UP_CANCELED, cpu);
+	cpu_notifier_register_done();
+
+	return -ENOMEM;
 }
 
 static int zram_rw_async_page(struct zram *zram,
