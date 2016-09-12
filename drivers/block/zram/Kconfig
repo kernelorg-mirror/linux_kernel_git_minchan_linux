@@ -13,3 +13,18 @@ config ZRAM
 	  disks and maybe many more.
 
 	  See zram.txt for more information.
+
+config ZRAM_ASYNC_IO
+	bool "support asynchronous IO"
+	depends on ZRAM && SMP
+	default n
+	help
+	  By default zram uses stream-based compression so it can use
+	  every CPU only if every CPU has streams. However, it gives
+	  poor performance on single-stream workload.
+
+	  This implementation uses a background thread per core and
+	  compress a stream by multiple core.
+
+	  You can disable the feature "echo 0 > /sys/block/zramx/use_aio"
+	  before setting disksize.

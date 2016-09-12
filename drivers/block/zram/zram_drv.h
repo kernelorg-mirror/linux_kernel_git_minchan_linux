@@ -119,5 +119,8 @@ struct zram {
 	 * zram is claimed so open request will be failed
 	 */
 	bool claim; /* Protected by bdev->bd_mutex */
+#ifdef CONFIG_ZRAM_ASYNC_IO
+	bool use_aio;
+#endif
 };
 #endif

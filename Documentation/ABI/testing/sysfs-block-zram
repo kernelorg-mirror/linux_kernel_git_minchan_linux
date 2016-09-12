@@ -175,3 +175,11 @@ Description:
 		device's debugging info useful for kernel developers. Its
 		format is not documented intentionally and may change
 		anytime without any notice.
+
+What:		/sys/block/zram<id>/use_aio
+Date:		July 2017
+Contact:	Minchan Kim <minchan@kernel.org>
+Description:
+		The use_aio file is read/write and to enable asynchronous
+		write support using multiple CPUs.
+		It increases write throughput in multiple CPU system.
