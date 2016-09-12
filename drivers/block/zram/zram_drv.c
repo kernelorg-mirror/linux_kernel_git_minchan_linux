@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
+#include <linux/kthread.h>
 #include <linux/err.h>
 #include <linux/idr.h>
 #include <linux/sysfs.h>
@@ -365,6 +366,48 @@ static ssize_t comp_algorithm_store(struct device *dev,
 	up_write(&zram->init_lock);
 	return len;
 }
+
+#ifdef CONFIG_ZRAM_ASYNC_IO
+static ssize_t use_aio_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	bool val;
+	struct zram *zram = dev_to_zram(dev);
+
+	down_read(&zram->init_lock);
+	val = zram->use_aio;
+	up_read(&zram->init_lock);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", val);
+}
+
+static ssize_t use_aio_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	int ret;
+	u16 do_async;
+	struct zram *zram  = dev_to_zram(dev);
+
+	ret = kstrtou16(buf, 10, &do_async);
+	if (ret)
+		return ret;
+
+	down_write(&zram->init_lock);
+	if (init_done(zram)) {
+		up_write(&zram->init_lock);
+		pr_info("Can't change for initialized device\n");
+		return -EBUSY;
+	}
+
+	if (do_async)
+		zram->use_aio = true;
+	else
+		zram->use_aio = false;
+	up_write(&zram->init_lock);
+
+	return len;
+}
+#endif
 
 static ssize_t compact_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
@@ -923,6 +966,389 @@ out:
 	zram_meta_put(zram);
 }
 
+
+#ifdef CONFIG_ZRAM_ASYNC_IO
+/*
+ * A number of page a worker can isolate from request queue all at once.
+ * It's a magic number got from the experiment via testing x86 and ARM.
+ */
+const int NR_BATCH_PAGES = 32;
+
+struct zram_worker {
+	struct task_struct *task;
+	struct list_head list;
+};
+
+struct zram_workers {
+	struct list_head req_list;
+	unsigned int nr_req;
+
+	int nr_running;
+	struct list_head worker_list;
+	wait_queue_head_t req_wait;
+	spinlock_t req_lock;
+} workers;
+
+struct bio_request {
+	struct bio *bio;   /* a bio structure to free when IO is done */
+	atomic_t nr_pages; /* the number of pages a bio include */
+};
+
+struct page_request {
+	struct zram *zram;
+	struct bio_request *bio_req;
+	struct bio_vec bvec;
+	u32 index;
+	int offset;
+	bool write;
+	struct list_head list;
+};
+
+static void worker_wake_up(void)
+{
+	/*
+	 * Unless it's enough workes to handle accumulated requests,
+	 * wake up new workers.
+	 */
+	if (workers.nr_running * NR_BATCH_PAGES < workers.nr_req) {
+		int nr_wakeup = (workers.nr_req + NR_BATCH_PAGES) /
+				NR_BATCH_PAGES - workers.nr_running;
+
+		wake_up_nr(&workers.req_wait, nr_wakeup);
+	}
+}
+
+static void zram_unplug(struct blk_plug_cb *cb, bool from_schedule)
+{
+	spin_lock(&workers.req_lock);
+	if (workers.nr_req)
+		worker_wake_up();
+	spin_unlock(&workers.req_lock);
+	kfree(cb);
+}
+
+static int zram_check_plugged(void)
+{
+	return !!blk_check_plugged(zram_unplug, NULL,
+			sizeof(struct blk_plug_cb));
+}
+
+int queue_page_request(struct zram *zram, struct bio_vec *bvec, u32 index,
+			int offset, bool write)
+{
+	struct page_request *page_req = kmalloc(sizeof(*page_req), GFP_NOIO);
+
+	if (!page_req)
+		return -ENOMEM;
+
+	page_req->bio_req = NULL;
+	page_req->zram = zram;
+	page_req->bvec = *bvec;
+	page_req->index = index;
+	page_req->offset = offset;
+	page_req->write = write;
+
+	spin_lock(&workers.req_lock);
+	list_add(&page_req->list, &workers.req_list);
+	workers.nr_req++;
+	if (!zram_check_plugged())
+		worker_wake_up();
+	spin_unlock(&workers.req_lock);
+
+	return 0;
+}
+
+int queue_page_request_list(struct zram *zram, struct bio_request *bio_req,
+			struct bio_vec *bvec, u32 index, int offset,
+			bool write, struct list_head *page_list)
+{
+	struct page_request *page_req = kmalloc(sizeof(*page_req), GFP_NOIO);
+
+	if (!page_req) {
+		while (!list_empty(page_list)) {
+			page_req = list_first_entry(page_list,
+					struct page_request, list);
+			list_del(&page_req->list);
+			kfree(page_req);
+		}
+
+		return -ENOMEM;
+	}
+
+	page_req->bio_req = bio_req;
+	page_req->zram = zram;
+	page_req->bvec = *bvec;
+	page_req->index = index;
+	page_req->offset = offset;
+	page_req->write = write;
+	atomic_inc(&bio_req->nr_pages);
+
+	list_add_tail(&page_req->list, page_list);
+
+	return 0;
+}
+
+/*
+ * @page_list: pages isolated from request queue
+ */
+static void get_page_requests(struct list_head *page_list)
+{
+	struct page_request *page_req;
+	int nr_pages;
+
+	for (nr_pages = 0; nr_pages < NR_BATCH_PAGES; nr_pages++) {
+		if  (list_empty(&workers.req_list))
+			break;
+
+		page_req = list_first_entry(&workers.req_list,
+					struct page_request, list);
+		list_move(&page_req->list, page_list);
+	}
+
+	workers.nr_req -= nr_pages;
+}
+
+/*
+ * move @page_list to request queue and wake up workers if it is necessary.
+ */
+static void run_worker(struct bio *bio, struct list_head *page_list,
+			unsigned int nr_pages)
+{
+	WARN_ON(list_empty(page_list));
+
+	spin_lock(&workers.req_lock);
+	list_splice_tail(page_list, &workers.req_list);
+	workers.nr_req += nr_pages;
+	if (bio->bi_opf & REQ_SYNC || !zram_check_plugged())
+		worker_wake_up();
+	spin_unlock(&workers.req_lock);
+}
+
+static bool __zram_make_async_request(struct zram *zram, struct bio *bio)
+{
+	int offset;
+	u32 index;
+	struct bio_vec bvec;
+	struct bvec_iter iter;
+	LIST_HEAD(page_list);
+	struct bio_request *bio_req;
+	unsigned int nr_pages = 0;
+	bool write = op_is_write(bio_op(bio));
+
+	if (!zram->use_aio || !op_is_write(bio_op(bio)))
+		return false;
+
+	bio_req = kmalloc(sizeof(*bio_req), GFP_NOIO);
+	if (!bio_req)
+		return false;
+
+	index = bio->bi_iter.bi_sector >> SECTORS_PER_PAGE_SHIFT;
+	offset = (bio->bi_iter.bi_sector &
+		  (SECTORS_PER_PAGE - 1)) << SECTOR_SHIFT;
+
+	bio_req->bio = bio;
+	atomic_set(&bio_req->nr_pages, 0);
+
+	bio_for_each_segment(bvec, bio, iter) {
+		int max_transfer_size = PAGE_SIZE - offset;
+
+		if (bvec.bv_len > max_transfer_size) {
+			struct bio_vec bv;
+
+			bv.bv_page = bvec.bv_page;
+			bv.bv_len = max_transfer_size;
+			bv.bv_offset = bvec.bv_offset;
+
+			if (queue_page_request_list(zram, bio_req, &bv,
+					index, offset, write, &page_list))
+				goto fail;
+
+			bv.bv_len = bvec.bv_len - max_transfer_size;
+			bv.bv_offset += max_transfer_size;
+			if (queue_page_request_list(zram, bio_req, &bv,
+					index + 1, 0, write, &page_list))
+				goto fail;
+		} else {
+			if (queue_page_request_list(zram, bio_req, &bvec,
+					index, offset, write, &page_list))
+				goto fail;
+		}
+
+		nr_pages++;
+		update_position(&index, &offset, &bvec);
+	}
+
+	run_worker(bio, &page_list, nr_pages);
+
+	return true;
+fail:
+	kfree(bio_req);
+
+	WARN_ON(!list_empty(&page_list));
+
+	return false;
+}
+
+void page_requests_rw(struct list_head *page_list)
+{
+	struct page_request *page_req;
+	bool write;
+	struct page *page;
+	struct zram *zram;
+	int err;
+	bool free_bio;
+	struct bio_request *bio_req;
+
+	while (!list_empty(page_list)) {
+		free_bio = false;
+		page_req = list_last_entry(page_list, struct page_request,
+					list);
+		write = page_req->write;
+		page = page_req->bvec.bv_page;
+		zram = page_req->zram;
+		bio_req = page_req->bio_req;
+		if (bio_req && atomic_dec_and_test(&bio_req->nr_pages))
+			free_bio = true;
+		list_del(&page_req->list);
+
+		err = zram_bvec_rw(zram, &page_req->bvec, page_req->index,
+			page_req->offset, page_req->write);
+
+		kfree(page_req);
+
+		/* page-based request */
+		if (!bio_req) {
+			page_endio(page, write, err);
+			zram_meta_put(zram);
+		/* bio-based request */
+		} else if (free_bio) {
+			if (likely(!err))
+				bio_endio(bio_req->bio);
+			else
+				bio_io_error(bio_req->bio);
+			kfree(bio_req);
+			zram_meta_put(zram);
+		}
+	}
+}
+
+static int zram_thread(void *data)
+{
+	DEFINE_WAIT(wait);
+	LIST_HEAD(page_list);
+
+	spin_lock(&workers.req_lock);
+	workers.nr_running++;
+
+	while (!kthread_should_stop()) {
+		if (list_empty(&workers.req_list)) {
+			prepare_to_wait_exclusive(&workers.req_wait, &wait,
+					TASK_INTERRUPTIBLE);
+			workers.nr_running--;
+			spin_unlock(&workers.req_lock);
+			schedule();
+			spin_lock(&workers.req_lock);
+			finish_wait(&workers.req_wait, &wait);
+			workers.nr_running++;
+			continue;
+		}
+
+		get_page_requests(&page_list);
+		if (list_empty(&page_list))
+			continue;
+
+		spin_unlock(&workers.req_lock);
+		page_requests_rw(&page_list);
+		cond_resched();
+		spin_lock(&workers.req_lock);
+	}
+
+	workers.nr_running--;
+	spin_unlock(&workers.req_lock);
+
+	return 0;
+}
+
+static void destroy_workers(void)
+{
+	struct zram_worker *worker;
+
+	while (!list_empty(&workers.worker_list)) {
+		worker = list_first_entry(&workers.worker_list,
+				struct zram_worker,
+				list);
+		kthread_stop(worker->task);
+		list_del(&worker->list);
+		kfree(worker);
+	}
+
+	WARN_ON(workers.nr_running);
+}
+
+static int create_workers(void)
+{
+	int i;
+	int nr_cpu = num_online_cpus();
+	struct zram_worker *worker;
+
+	INIT_LIST_HEAD(&workers.worker_list);
+	INIT_LIST_HEAD(&workers.req_list);
+	spin_lock_init(&workers.req_lock);
+	init_waitqueue_head(&workers.req_wait);
+
+	for (i = 0; i < nr_cpu; i++) {
+		worker = kmalloc(sizeof(*worker), GFP_KERNEL);
+		if (!worker)
+			goto error;
+
+		worker->task = kthread_run(zram_thread, NULL, "zramd-%d", i);
+		if (IS_ERR(worker->task)) {
+			kfree(worker);
+			goto error;
+		}
+
+		list_add(&worker->list, &workers.worker_list);
+	}
+
+	return 0;
+
+error:
+	destroy_workers();
+	return 1;
+}
+
+static int zram_rw_async_page(struct zram *zram,
+			struct bio_vec *bv, u32 index, int offset,
+			bool is_write)
+{
+	if (!zram->use_aio || !is_write)
+		return 1;
+
+	return queue_page_request(zram, bv, index, offset, is_write);
+}
+#else
+static bool __zram_make_async_request(struct zram *zram, struct bio *bio)
+{
+	return false;
+}
+
+static int zram_rw_async_page(struct zram *zram,
+			struct bio_vec *bv, u32 index, int offset,
+			bool is_write)
+{
+	return 1;
+}
+
+static int create_workers(void)
+{
+	return 0;
+}
+
+static void destroy_workers(void)
+{
+}
+#endif
+
 /*
  * Handler function for all zram I/O requests.
  */
@@ -953,6 +1379,9 @@ static blk_qc_t zram_make_request(struct request_queue *queue, struct bio *bio)
 		zram_meta_put(zram);
 		goto out;
 	}
+
+	if (__zram_make_async_request(zram, bio))
+		goto out;
 
 	__zram_make_sync_request(zram, bio);
 out:
@@ -1028,8 +1457,12 @@ static int zram_rw_page(struct block_device *bdev, sector_t sector,
 	bv.bv_len = PAGE_SIZE;
 	bv.bv_offset = 0;
 
-	err = zram_rw_sync_page(bdev, zram, &bv, index, offset, is_write);
+	err = zram_rw_async_page(zram, &bv, index, offset, is_write);
+	if (!err)
+		goto out;
 
+	err = zram_rw_sync_page(bdev, zram, &bv, index, offset, is_write);
+out:
 	return err;
 }
 
@@ -1066,7 +1499,6 @@ static void zram_reset_device(struct zram *zram)
 	/* Reset stats */
 	memset(&zram->stats, 0, sizeof(zram->stats));
 	zram->disksize = 0;
-
 	set_capacity(zram->disk, 0);
 	part_stat_set_all(&zram->disk->part0, 0);
 
@@ -1211,6 +1643,9 @@ static DEVICE_ATTR_RW(mem_limit);
 static DEVICE_ATTR_RW(mem_used_max);
 static DEVICE_ATTR_RW(max_comp_streams);
 static DEVICE_ATTR_RW(comp_algorithm);
+#ifdef CONFIG_ZRAM_ASYNC_IO
+static DEVICE_ATTR_RW(use_aio);
+#endif
 
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
@@ -1231,6 +1666,9 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_mem_used_max.attr,
 	&dev_attr_max_comp_streams.attr,
 	&dev_attr_comp_algorithm.attr,
+#ifdef CONFIG_ZRAM_ASYNC_IO
+	&dev_attr_use_aio.attr,
+#endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
 	&dev_attr_debug_stat.attr,
@@ -1261,7 +1699,9 @@ static int zram_add(void)
 	device_id = ret;
 
 	init_rwsem(&zram->init_lock);
-
+#ifdef CONFIG_ZRAM_ASYNC_IO
+	zram->use_aio = true;
+#endif
 	queue = blk_alloc_queue(GFP_KERNEL);
 	if (!queue) {
 		pr_err("Error allocating disk queue for device %d\n",
@@ -1485,6 +1925,9 @@ static int __init zram_init(void)
 		num_devices--;
 	}
 
+	if (create_workers())
+		goto out_error;
+
 	return 0;
 
 out_error:
@@ -1495,6 +1938,7 @@ out_error:
 static void __exit zram_exit(void)
 {
 	destroy_devices();
+	destroy_workers();
 }
 
 module_init(zram_init);
