@@ -13,3 +13,12 @@ config ZRAM
 	  disks and maybe many more.
 
 	  See zram.txt for more information.
+
+config ZRAM_PARALLEL_IO
+	bool "support parallel IO"
+	depends on ZRAM && SMP
+	default n
+	help
+	  Use background threads to compress/decompress IO data to leverage
+	  multiple CPU power. It can increase read/write throughput a lot
+	  while random/direct IO's throughput is decreased.
