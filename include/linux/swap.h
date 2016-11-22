@@ -196,6 +196,12 @@ struct swap_cluster_list {
 	struct swap_cluster_info tail;
 };
 
+struct swap_operations {
+	void (*scan_slot)(struct swap_info_struct *si,
+			unsigned long *scan_base, unsigned long *offset);
+	bool (*check_slot)(struct swap_info_struct *si, unsigned long offset);
+};
+
 /*
  * The in-memory structure used to track swap areas.
  */
@@ -240,6 +246,7 @@ struct swap_info_struct {
 					 */
 	struct work_struct discard_work; /* discard worker */
 	struct swap_cluster_list discard_clusters; /* discard clusters list */
+	struct swap_operations *s_ops;
 };
 
 /* linux/mm/workingset.c */

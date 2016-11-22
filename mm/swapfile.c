@@ -421,8 +421,7 @@ static void dec_cluster_info_page(struct swap_info_struct *p,
  * It's possible scan_swap_map() uses a free cluster in the middle of free
  * cluster list. Avoiding such abuse to avoid list corruption.
  */
-static bool
-scan_swap_map_ssd_cluster_conflict(struct swap_info_struct *si,
+static bool ssd_cluster_verify(struct swap_info_struct *si,
 	unsigned long offset)
 {
 	struct percpu_cluster *percpu_cluster;
@@ -434,18 +433,18 @@ scan_swap_map_ssd_cluster_conflict(struct swap_info_struct *si,
 		cluster_is_free(&si->cluster_info[offset]);
 
 	if (!conflict)
-		return false;
+		return true;
 
 	percpu_cluster = this_cpu_ptr(si->percpu_cluster);
 	cluster_set_null(&percpu_cluster->index);
-	return true;
+	return false;
 }
 
 /*
  * Try to get a swap entry from current cpu's swap entry pool (a cluster). This
  * might involve allocating a new cluster for current CPU too.
  */
-static void scan_swap_map_try_ssd_cluster(struct swap_info_struct *si,
+static void scan_ssd_cluster(struct swap_info_struct *si,
 			unsigned long *scan_base, unsigned long *offset)
 {
 	struct percpu_cluster *cluster;
@@ -578,20 +577,12 @@ found:
 	*offset = ofs;
 }
 
-static void scan_slot(struct swap_info_struct *si,
-			unsigned long *scan_base, unsigned long *offset)
-{
-	if (si->cluster_info)
-		scan_swap_map_try_ssd_cluster(si, scan_base, offset);
-	else
-		scan_hdd_cluster(si, scan_base, offset);
-}
-
 static unsigned long scan_swap_map(struct swap_info_struct *si,
 				   unsigned char usage)
 {
 	unsigned long offset;
 	unsigned long scan_base;
+	struct swap_operations *s_ops = si->s_ops;
 
 	si->flags += SWP_SCANNING;
 
@@ -607,11 +598,11 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 	 * And we let swap pages go all over an SSD partition.  Hugh
 	 */
 rescan:
-	scan_slot(si, &scan_base, &offset);
+	s_ops->scan_slot(si, &scan_base, &offset);
 
 checks:
-	if (si->cluster_info)
-		if (scan_swap_map_ssd_cluster_conflict(si, offset))
+	if (s_ops->check_slot)
+		if (!s_ops->check_slot(si, offset))
 			goto rescan;
 
 	if (!(si->flags & SWP_WRITEOK))
@@ -1972,6 +1963,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	swap_map = p->swap_map;
 	p->swap_map = NULL;
 	ssd_cluster_destroy(p);
+	p->s_ops = NULL;
 	frontswap_map = frontswap_map_get(p);
 	spin_unlock(&p->lock);
 	spin_unlock(&swap_lock);
@@ -2429,6 +2421,15 @@ static bool swap_discardable(struct swap_info_struct *si)
 	return true;
 }
 
+struct swap_operations hdd_ops = {
+	.scan_slot = scan_hdd_cluster,
+};
+
+struct swap_operations ssd_ops = {
+	.scan_slot = scan_ssd_cluster,
+	.check_slot = ssd_cluster_verify,
+};
+
 SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 {
 	struct swap_info_struct *p;
@@ -2553,8 +2554,10 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		}
 	}
 
+	p->s_ops = &hdd_ops;
 	if (p->bdev && blk_queue_nonrot(bdev_get_queue(p->bdev))) {
 		p->flags |= SWP_SOLIDSTATE;
+		p->s_ops = &ssd_ops;
 		error = ssd_cluster_init(p, swap_header, maxpages);
 		if (error)
 			goto bad_swap;
@@ -2594,6 +2597,7 @@ bad_swap:
 	spin_lock(&swap_lock);
 	p->swap_file = NULL;
 	p->flags = 0;
+	p->s_ops = NULL;
 	spin_unlock(&swap_lock);
 	vfree(swap_map);
 	if (swap_file) {
