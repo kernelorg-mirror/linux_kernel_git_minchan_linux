@@ -1978,7 +1978,8 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	p->max = 0;
 	swap_map = p->swap_map;
 	p->swap_map = NULL;
-	ssd_cluster_destroy(p);
+	if (p->s_ops->destroy)
+		p->s_ops->destroy(p);
 	p->s_ops = NULL;
 	frontswap_map = frontswap_map_get(p);
 	spin_unlock(&p->lock);
@@ -2442,6 +2443,8 @@ struct swap_operations hdd_ops = {
 };
 
 struct swap_operations ssd_ops = {
+	.initialize = ssd_cluster_init,
+	.destroy = ssd_cluster_destroy,
 	.scan_slot = scan_ssd_cluster,
 	.check_slot = ssd_cluster_verify,
 	.swap_entry_alloc = ssd_swap_entry_alloc,
@@ -2576,7 +2579,10 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	if (p->bdev && blk_queue_nonrot(bdev_get_queue(p->bdev))) {
 		p->flags |= SWP_SOLIDSTATE;
 		p->s_ops = &ssd_ops;
-		error = ssd_cluster_init(p, swap_header, maxpages);
+	}
+
+	if (p->s_ops->initialize) {
+		error = p->s_ops->initialize(p, swap_header, maxpages);
 		if (error)
 			goto bad_swap;
 	}

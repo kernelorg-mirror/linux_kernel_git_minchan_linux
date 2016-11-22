@@ -197,6 +197,9 @@ struct swap_cluster_list {
 };
 
 struct swap_operations {
+	int  (*initialize)(struct swap_info_struct *si,
+			union swap_header *header, unsigned long maxpages);
+	void (*destroy)(struct swap_info_struct *si);
 	void (*scan_slot)(struct swap_info_struct *si,
 			unsigned long *scan_base, unsigned long *offset);
 	bool (*check_slot)(struct swap_info_struct *si, unsigned long offset);
