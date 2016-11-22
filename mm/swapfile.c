@@ -495,6 +495,40 @@ new_cluster:
 	*scan_base = tmp;
 }
 
+static bool full_scan(struct swap_info_struct *si, unsigned long scan_base,
+			unsigned long *offset)
+{
+	bool wrapped = false;
+	int latency_ration = LATENCY_LIMIT;
+	unsigned long cursor = *offset;
+	unsigned long end = si->highest_bit + 1;
+
+retry:
+	while (cursor < end) {
+		if (!si->swap_map[cursor])
+			goto found;
+		if (si->swap_map[cursor] == SWAP_HAS_CACHE && vm_swap_full())
+			goto found;
+		if (unlikely(--latency_ration < 0)) {
+			cond_resched();
+			latency_ration = LATENCY_LIMIT;
+		}
+		cursor++;
+	}
+
+	if (!wrapped) {
+		cursor = si->lowest_bit;
+		end = scan_base;
+		wrapped = true;
+		goto retry;
+	}
+	return false;
+
+found:
+	*offset = cursor;
+	return true;
+}
+
 static unsigned long scan_swap_map(struct swap_info_struct *si,
 				   unsigned char usage)
 {
@@ -609,36 +643,12 @@ checks:
 	return offset;
 
 scan:
+	/* full_scan is time consuming so we release the lock */
 	spin_unlock(&si->lock);
-	while (++offset <= si->highest_bit) {
-		if (!si->swap_map[offset]) {
-			spin_lock(&si->lock);
-			goto checks;
-		}
-		if (vm_swap_full() && si->swap_map[offset] == SWAP_HAS_CACHE) {
-			spin_lock(&si->lock);
-			goto checks;
-		}
-		if (unlikely(--latency_ration < 0)) {
-			cond_resched();
-			latency_ration = LATENCY_LIMIT;
-		}
-	}
-	offset = si->lowest_bit;
-	while (offset < scan_base) {
-		if (!si->swap_map[offset]) {
-			spin_lock(&si->lock);
-			goto checks;
-		}
-		if (vm_swap_full() && si->swap_map[offset] == SWAP_HAS_CACHE) {
-			spin_lock(&si->lock);
-			goto checks;
-		}
-		if (unlikely(--latency_ration < 0)) {
-			cond_resched();
-			latency_ration = LATENCY_LIMIT;
-		}
-		offset++;
+	++offset;
+	if (full_scan(si, scan_base, &offset)) {
+		spin_lock(&si->lock);
+		goto checks;
 	}
 	spin_lock(&si->lock);
 
