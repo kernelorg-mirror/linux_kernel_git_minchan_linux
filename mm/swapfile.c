@@ -2283,64 +2283,55 @@ static unsigned long read_swap_header(struct swap_info_struct *p,
 	return maxpages;
 }
 
-static int setup_swap_map_and_extents(struct swap_info_struct *p,
-					union swap_header *swap_header,
-					unsigned char *swap_map,
-					struct swap_cluster_info *cluster_info,
-					unsigned long maxpages,
-					sector_t *span)
+static int ssd_cluster_init(struct swap_info_struct *p,
+		union swap_header *swap_header, unsigned long maxpages)
 {
-	int i;
-	unsigned int nr_good_pages;
-	int nr_extents;
+	int i, cpu;
+	unsigned long page_nr;
 	unsigned long nr_clusters = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
 	unsigned long idx = p->cluster_next / SWAPFILE_CLUSTER;
+	struct swap_cluster_info *cluster_info;
 
-	nr_good_pages = maxpages - 1;	/* omit header page */
+	/*
+	 * select a random position to start with to help wear leveling
+	 * SSD
+	 */
+	p->cluster_next = 1 + (prandom_u32() % p->highest_bit);
+
+	cluster_info = vzalloc(DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER) *
+				sizeof(*cluster_info));
+	if (!cluster_info)
+		return -ENOMEM;
+
+	p->percpu_cluster = alloc_percpu(struct percpu_cluster);
+	if (!p->percpu_cluster) {
+		vfree(cluster_info);
+		return -ENOMEM;
+	}
+
+	for_each_possible_cpu(cpu) {
+		struct percpu_cluster *cluster;
+
+		cluster = per_cpu_ptr(p->percpu_cluster, cpu);
+		cluster_set_null(&cluster->index);
+	}
 
 	cluster_list_init(&p->free_clusters);
 	cluster_list_init(&p->discard_clusters);
 
+	/*
+	 * Haven't marked the cluster free yet, no list operation involved
+	 */
 	for (i = 0; i < swap_header->info.nr_badpages; i++) {
-		unsigned int page_nr = swap_header->info.badpages[i];
-		if (page_nr == 0 || page_nr > swap_header->info.last_page)
-			return -EINVAL;
-		if (page_nr < maxpages) {
-			swap_map[page_nr] = SWAP_MAP_BAD;
-			nr_good_pages--;
-			/*
-			 * Haven't marked the cluster free yet, no list
-			 * operation involved
-			 */
+		page_nr = swap_header->info.badpages[i];
+		if (page_nr < maxpages)
 			inc_cluster_info_page(p, cluster_info, page_nr);
-		}
 	}
 
-	/* Haven't marked the cluster free yet, no list operation involved */
 	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++)
 		inc_cluster_info_page(p, cluster_info, i);
 
-	if (nr_good_pages) {
-		swap_map[0] = SWAP_MAP_BAD;
-		/*
-		 * Not mark the cluster free yet, no list
-		 * operation involved
-		 */
-		inc_cluster_info_page(p, cluster_info, 0);
-		p->max = maxpages;
-		p->pages = nr_good_pages;
-		nr_extents = setup_swap_extents(p, span);
-		if (nr_extents < 0)
-			return nr_extents;
-		nr_good_pages = p->pages;
-	}
-	if (!nr_good_pages) {
-		pr_warn("Empty swap-file\n");
-		return -EINVAL;
-	}
-
-	if (!cluster_info)
-		return nr_extents;
+	inc_cluster_info_page(p, cluster_info, 0);
 
 	for (i = 0; i < nr_clusters; i++) {
 		if (!cluster_count(&cluster_info[idx])) {
@@ -2352,6 +2343,47 @@ static int setup_swap_map_and_extents(struct swap_info_struct *p,
 		if (idx == nr_clusters)
 			idx = 0;
 	}
+
+	return 0;
+}
+
+static int setup_swap_map_and_extents(struct swap_info_struct *p,
+					union swap_header *swap_header,
+					unsigned char *swap_map,
+					unsigned long maxpages,
+					sector_t *span)
+{
+	int i;
+	unsigned int nr_good_pages;
+	int nr_extents;
+
+	nr_good_pages = maxpages - 1;	/* omit header page */
+
+	for (i = 0; i < swap_header->info.nr_badpages; i++) {
+		unsigned int page_nr = swap_header->info.badpages[i];
+		if (page_nr == 0 || page_nr > swap_header->info.last_page)
+			return -EINVAL;
+		if (page_nr < maxpages) {
+			swap_map[page_nr] = SWAP_MAP_BAD;
+			nr_good_pages--;
+		}
+	}
+
+	if (nr_good_pages) {
+		swap_map[0] = SWAP_MAP_BAD;
+		p->max = maxpages;
+		p->pages = nr_good_pages;
+		nr_extents = setup_swap_extents(p, span);
+		if (nr_extents < 0)
+			return nr_extents;
+		nr_good_pages = p->pages;
+	}
+
+	if (!nr_good_pages) {
+		pr_warn("Empty swap-file\n");
+		return -EINVAL;
+	}
+
 	return nr_extents;
 }
 
@@ -2447,44 +2479,18 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		error = -ENOMEM;
 		goto bad_swap;
 	}
-	if (p->bdev && blk_queue_nonrot(bdev_get_queue(p->bdev))) {
-		int cpu;
-
-		p->flags |= SWP_SOLIDSTATE;
-		/*
-		 * select a random position to start with to help wear leveling
-		 * SSD
-		 */
-		p->cluster_next = 1 + (prandom_u32() % p->highest_bit);
-
-		cluster_info = vzalloc(DIV_ROUND_UP(maxpages,
-			SWAPFILE_CLUSTER) * sizeof(*cluster_info));
-		if (!cluster_info) {
-			error = -ENOMEM;
-			goto bad_swap;
-		}
-		p->percpu_cluster = alloc_percpu(struct percpu_cluster);
-		if (!p->percpu_cluster) {
-			error = -ENOMEM;
-			goto bad_swap;
-		}
-		for_each_possible_cpu(cpu) {
-			struct percpu_cluster *cluster;
-			cluster = per_cpu_ptr(p->percpu_cluster, cpu);
-			cluster_set_null(&cluster->index);
-		}
-	}
 
 	error = swap_cgroup_swapon(p->type, maxpages);
 	if (error)
 		goto bad_swap;
 
 	nr_extents = setup_swap_map_and_extents(p, swap_header, swap_map,
-		cluster_info, maxpages, &span);
+						maxpages, &span);
 	if (unlikely(nr_extents < 0)) {
 		error = nr_extents;
 		goto bad_swap;
 	}
+
 	/* frontswap enabled? set up bit-per-page map for frontswap */
 	if (IS_ENABLED(CONFIG_FRONTSWAP))
 		frontswap_map = vzalloc(BITS_TO_LONGS(maxpages) * sizeof(long));
@@ -2519,6 +2525,13 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		}
 	}
 
+	if (p->bdev && blk_queue_nonrot(bdev_get_queue(p->bdev))) {
+		p->flags |= SWP_SOLIDSTATE;
+		error = ssd_cluster_init(p, swap_header, maxpages);
+		if (error)
+			goto bad_swap;
+	}
+
 	mutex_lock(&swapon_mutex);
 	prio = -1;
 	if (swap_flags & SWAP_FLAG_PREFER)
@@ -2544,8 +2557,6 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	error = 0;
 	goto out;
 bad_swap:
-	free_percpu(p->percpu_cluster);
-	p->percpu_cluster = NULL;
 	if (inode && S_ISBLK(inode->i_mode) && p->bdev) {
 		set_blocksize(p->bdev, p->old_block_size);
 		blkdev_put(p->bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
@@ -2557,7 +2568,6 @@ bad_swap:
 	p->flags = 0;
 	spin_unlock(&swap_lock);
 	vfree(swap_map);
-	vfree(cluster_info);
 	if (swap_file) {
 		if (inode && S_ISREG(inode->i_mode)) {
 			inode_unlock(inode);
