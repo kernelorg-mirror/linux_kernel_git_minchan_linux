@@ -45,6 +45,8 @@ static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 static void free_swap_count_continuations(struct swap_info_struct *);
 static sector_t map_swap_entry(swp_entry_t, struct block_device**);
 
+static void ssd_cluster_destroy(struct swap_info_struct *si);
+
 DEFINE_SPINLOCK(swap_lock);
 static unsigned int nr_swapfiles;
 atomic_long_t nr_swap_pages;
@@ -1844,7 +1846,6 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 {
 	struct swap_info_struct *p = NULL;
 	unsigned char *swap_map;
-	struct swap_cluster_info *cluster_info;
 	unsigned long *frontswap_map;
 	struct file *swap_file, *victim;
 	struct address_space *mapping;
@@ -1947,18 +1948,14 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	p->max = 0;
 	swap_map = p->swap_map;
 	p->swap_map = NULL;
-	cluster_info = p->cluster_info;
-	p->cluster_info = NULL;
+	ssd_cluster_destroy(p);
 	frontswap_map = frontswap_map_get(p);
 	spin_unlock(&p->lock);
 	spin_unlock(&swap_lock);
 	frontswap_invalidate_area(p->type);
 	frontswap_map_set(p, NULL);
 	mutex_unlock(&swapon_mutex);
-	free_percpu(p->percpu_cluster);
-	p->percpu_cluster = NULL;
 	vfree(swap_map);
-	vfree(cluster_info);
 	vfree(frontswap_map);
 	/* Destroy swap account information */
 	swap_cgroup_swapoff(p->type);
@@ -2345,6 +2342,14 @@ static int ssd_cluster_init(struct swap_info_struct *p,
 	}
 
 	return 0;
+}
+
+static void ssd_cluster_destroy(struct swap_info_struct *si)
+{
+	free_percpu(si->percpu_cluster);
+	si->percpu_cluster = NULL;
+	vfree(si->cluster_info);
+	si->cluster_info = NULL;
 }
 
 static int setup_swap_map_and_extents(struct swap_info_struct *p,
