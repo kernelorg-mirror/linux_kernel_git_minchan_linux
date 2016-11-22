@@ -606,13 +606,14 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 	 * But we do now try to find an empty cluster.  -Andrea
 	 * And we let swap pages go all over an SSD partition.  Hugh
 	 */
+rescan:
 	scan_slot(si, &scan_base, &offset);
 
 checks:
-	if (si->cluster_info) {
-		while (scan_swap_map_ssd_cluster_conflict(si, offset))
-			scan_swap_map_try_ssd_cluster(si, &scan_base, &offset);
-	}
+	if (si->cluster_info)
+		if (scan_swap_map_ssd_cluster_conflict(si, offset))
+			goto rescan;
+
 	if (!(si->flags & SWP_WRITEOK))
 		goto no_page;
 	if (!si->highest_bit)
