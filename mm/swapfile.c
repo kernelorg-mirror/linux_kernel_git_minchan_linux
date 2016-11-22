@@ -417,6 +417,18 @@ static void dec_cluster_info_page(struct swap_info_struct *p,
 	}
 }
 
+static void ssd_swap_entry_alloc(struct swap_info_struct *si,
+				unsigned long offset)
+{
+	inc_cluster_info_page(si, si->cluster_info, offset);
+}
+
+static void ssd_swap_entry_free(struct swap_info_struct *si,
+				unsigned long offset)
+{
+	dec_cluster_info_page(si, si->cluster_info, offset);
+}
+
 /*
  * It's possible scan_swap_map() uses a free cluster in the middle of free
  * cluster list. Avoiding such abuse to avoid list corruption.
@@ -640,7 +652,8 @@ checks:
 		spin_unlock(&swap_avail_lock);
 	}
 	si->swap_map[offset] = usage;
-	inc_cluster_info_page(si, si->cluster_info, offset);
+	if (s_ops->swap_entry_alloc)
+		s_ops->swap_entry_alloc(si, offset);
 	si->cluster_next = offset + 1;
 	si->flags -= SWP_SCANNING;
 
@@ -818,8 +831,11 @@ static unsigned char swap_entry_free(struct swap_info_struct *p,
 
 	/* free if no reference */
 	if (!usage) {
+		struct swap_operations *s_ops = p->s_ops;
+
 		mem_cgroup_uncharge_swap(entry);
-		dec_cluster_info_page(p, p->cluster_info, offset);
+		if (s_ops->swap_entry_free)
+			s_ops->swap_entry_free(p, offset);
 		if (offset < p->lowest_bit)
 			p->lowest_bit = offset;
 		if (offset > p->highest_bit) {
@@ -2428,6 +2444,8 @@ struct swap_operations hdd_ops = {
 struct swap_operations ssd_ops = {
 	.scan_slot = scan_ssd_cluster,
 	.check_slot = ssd_cluster_verify,
+	.swap_entry_alloc = ssd_swap_entry_alloc,
+	.swap_entry_free = ssd_swap_entry_free,
 };
 
 SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)

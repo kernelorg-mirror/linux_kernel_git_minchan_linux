@@ -200,6 +200,10 @@ struct swap_operations {
 	void (*scan_slot)(struct swap_info_struct *si,
 			unsigned long *scan_base, unsigned long *offset);
 	bool (*check_slot)(struct swap_info_struct *si, unsigned long offset);
+	void (*swap_entry_alloc)(struct swap_info_struct *si,
+					unsigned long offset);
+	void (*swap_entry_free)(struct swap_info_struct *si,
+					unsigned long offset);
 };
 
 /*
