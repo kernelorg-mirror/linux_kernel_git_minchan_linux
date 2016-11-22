@@ -446,7 +446,7 @@ scan_swap_map_ssd_cluster_conflict(struct swap_info_struct *si,
  * might involve allocating a new cluster for current CPU too.
  */
 static void scan_swap_map_try_ssd_cluster(struct swap_info_struct *si,
-	unsigned long *offset, unsigned long *scan_base)
+			unsigned long *scan_base, unsigned long *offset)
 {
 	struct percpu_cluster *cluster;
 	bool found_free;
@@ -529,14 +529,73 @@ found:
 	return true;
 }
 
+static void scan_hdd_cluster(struct swap_info_struct *si,
+			unsigned long *scan_base, unsigned long *offset)
+{
+	unsigned long last_in_cluster = 0;
+	int latency_ration = LATENCY_LIMIT;
+	unsigned long base = *scan_base;
+	unsigned long ofs = *offset;
+
+	if (unlikely(!si->cluster_nr--)) {
+		if (si->pages - si->inuse_pages < SWAPFILE_CLUSTER) {
+			si->cluster_nr = SWAPFILE_CLUSTER - 1;
+			goto found;
+		}
+
+		spin_unlock(&si->lock);
+
+		/*
+		 * hdd seek is expensive, start searching for new cluster from
+		 * start of partition, to minimize the span of allocated swap.
+		 */
+		base = ofs = si->lowest_bit;
+		last_in_cluster = ofs + SWAPFILE_CLUSTER - 1;
+
+		/* Locate the first empty (unaligned) cluster */
+		for (; last_in_cluster <= si->highest_bit; ofs++) {
+			if (si->swap_map[ofs])
+				last_in_cluster = ofs + SWAPFILE_CLUSTER;
+			else if (ofs == last_in_cluster) {
+				spin_lock(&si->lock);
+				ofs -= SWAPFILE_CLUSTER - 1;
+				si->cluster_next = ofs;
+				si->cluster_nr = SWAPFILE_CLUSTER - 1;
+				goto found;
+			}
+			if (unlikely(--latency_ration < 0)) {
+				cond_resched();
+				latency_ration = LATENCY_LIMIT;
+			}
+		}
+
+		ofs = base;
+		spin_lock(&si->lock);
+		si->cluster_nr = SWAPFILE_CLUSTER - 1;
+	}
+found:
+	*scan_base = base;
+	*offset = ofs;
+}
+
+static void scan_slot(struct swap_info_struct *si,
+			unsigned long *scan_base, unsigned long *offset)
+{
+	if (si->cluster_info)
+		scan_swap_map_try_ssd_cluster(si, scan_base, offset);
+	else
+		scan_hdd_cluster(si, scan_base, offset);
+}
+
 static unsigned long scan_swap_map(struct swap_info_struct *si,
 				   unsigned char usage)
 {
 	unsigned long offset;
 	unsigned long scan_base;
-	unsigned long last_in_cluster = 0;
-	int latency_ration = LATENCY_LIMIT;
 
+	si->flags += SWP_SCANNING;
+
+	scan_base = offset = si->cluster_next;
 	/*
 	 * We try to cluster swap pages by allocating them sequentially
 	 * in swap.  Once we've allocated SWAPFILE_CLUSTER pages this
@@ -547,59 +606,12 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 	 * But we do now try to find an empty cluster.  -Andrea
 	 * And we let swap pages go all over an SSD partition.  Hugh
 	 */
-
-	si->flags += SWP_SCANNING;
-	scan_base = offset = si->cluster_next;
-
-	/* SSD algorithm */
-	if (si->cluster_info) {
-		scan_swap_map_try_ssd_cluster(si, &offset, &scan_base);
-		goto checks;
-	}
-
-	if (unlikely(!si->cluster_nr--)) {
-		if (si->pages - si->inuse_pages < SWAPFILE_CLUSTER) {
-			si->cluster_nr = SWAPFILE_CLUSTER - 1;
-			goto checks;
-		}
-
-		spin_unlock(&si->lock);
-
-		/*
-		 * If seek is expensive, start searching for new cluster from
-		 * start of partition, to minimize the span of allocated swap.
-		 * If seek is cheap, that is the SWP_SOLIDSTATE si->cluster_info
-		 * case, just handled by scan_swap_map_try_ssd_cluster() above.
-		 */
-		scan_base = offset = si->lowest_bit;
-		last_in_cluster = offset + SWAPFILE_CLUSTER - 1;
-
-		/* Locate the first empty (unaligned) cluster */
-		for (; last_in_cluster <= si->highest_bit; offset++) {
-			if (si->swap_map[offset])
-				last_in_cluster = offset + SWAPFILE_CLUSTER;
-			else if (offset == last_in_cluster) {
-				spin_lock(&si->lock);
-				offset -= SWAPFILE_CLUSTER - 1;
-				si->cluster_next = offset;
-				si->cluster_nr = SWAPFILE_CLUSTER - 1;
-				goto checks;
-			}
-			if (unlikely(--latency_ration < 0)) {
-				cond_resched();
-				latency_ration = LATENCY_LIMIT;
-			}
-		}
-
-		offset = scan_base;
-		spin_lock(&si->lock);
-		si->cluster_nr = SWAPFILE_CLUSTER - 1;
-	}
+	scan_slot(si, &scan_base, &offset);
 
 checks:
 	if (si->cluster_info) {
 		while (scan_swap_map_ssd_cluster_conflict(si, offset))
-			scan_swap_map_try_ssd_cluster(si, &offset, &scan_base);
+			scan_swap_map_try_ssd_cluster(si, &scan_base, &offset);
 	}
 	if (!(si->flags & SWP_WRITEOK))
 		goto no_page;
