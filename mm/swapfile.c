@@ -362,16 +362,15 @@ static void swap_discard_work(struct work_struct *work)
 }
 
 /*
- * The cluster corresponding to page_nr will be used. The cluster will be
+ * The cluster corresponding to offset will be used. The cluster will be
  * removed from free cluster list and its usage counter will be increased.
  */
 static void inc_cluster_info_page(struct swap_info_struct *p,
-	struct swap_cluster_info *cluster_info, unsigned long page_nr)
+					unsigned long offset)
 {
-	unsigned long idx = page_nr / SWAPFILE_CLUSTER;
+	struct swap_cluster_info *cluster_info = p->cluster_info;
+	unsigned long idx = offset / SWAPFILE_CLUSTER;
 
-	if (!cluster_info)
-		return;
 	if (cluster_is_free(&cluster_info[idx])) {
 		VM_BUG_ON(cluster_list_first(&p->free_clusters) != idx);
 		cluster_list_del_first(&p->free_clusters, cluster_info);
@@ -384,17 +383,16 @@ static void inc_cluster_info_page(struct swap_info_struct *p,
 }
 
 /*
- * The cluster corresponding to page_nr decreases one usage. If the usage
+ * The cluster corresponding to offset decreases one usage. If the usage
  * counter becomes 0, which means no page in the cluster is in using, we can
  * optionally discard the cluster and add it to free cluster list.
  */
 static void dec_cluster_info_page(struct swap_info_struct *p,
-	struct swap_cluster_info *cluster_info, unsigned long page_nr)
+					unsigned long offset)
 {
-	unsigned long idx = page_nr / SWAPFILE_CLUSTER;
+	unsigned long idx = offset / SWAPFILE_CLUSTER;
+	struct swap_cluster_info *cluster_info = p->cluster_info;
 
-	if (!cluster_info)
-		return;
 
 	VM_BUG_ON(cluster_count(&cluster_info[idx]) == 0);
 	cluster_set_count(&cluster_info[idx],
@@ -420,13 +418,13 @@ static void dec_cluster_info_page(struct swap_info_struct *p,
 static void ssd_swap_entry_alloc(struct swap_info_struct *si,
 				unsigned long offset)
 {
-	inc_cluster_info_page(si, si->cluster_info, offset);
+	inc_cluster_info_page(si, offset);
 }
 
 static void ssd_swap_entry_free(struct swap_info_struct *si,
 				unsigned long offset)
 {
-	dec_cluster_info_page(si, si->cluster_info, offset);
+	dec_cluster_info_page(si, offset);
 }
 
 /*
@@ -2354,13 +2352,13 @@ static int ssd_cluster_init(struct swap_info_struct *p,
 	for (i = 0; i < swap_header->info.nr_badpages; i++) {
 		page_nr = swap_header->info.badpages[i];
 		if (page_nr < maxpages)
-			inc_cluster_info_page(p, cluster_info, page_nr);
+			inc_cluster_info_page(p, page_nr);
 	}
 
 	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++)
-		inc_cluster_info_page(p, cluster_info, i);
+		inc_cluster_info_page(p, i);
 
-	inc_cluster_info_page(p, cluster_info, 0);
+	inc_cluster_info_page(p, 0);
 
 	for (i = 0; i < nr_clusters; i++) {
 		if (!cluster_count(&cluster_info[idx])) {
