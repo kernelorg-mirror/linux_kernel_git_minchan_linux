@@ -866,7 +866,6 @@ const int NR_PAGES_FOR_BATCH_IO = 2;
 struct zram_worker {
 	struct task_struct *task;
 	struct list_head list;
-	unsigned long long start_jiffies;
 };
 
 struct zram_workers {
@@ -875,13 +874,10 @@ struct zram_workers {
 	unsigned int nr_req;
 	/*
 	 * the number of existing zramd.
-	 * protected by list_lock
+	 * protected by req_lock
 	 */
 	int nr_thread;
-	spinlock_t list_lock;
 	struct list_head idle_list;
-
-	wait_queue_head_t req_wait;
 } workers;
 
 struct bio_request {
@@ -906,10 +902,14 @@ struct page_request {
 
 static void wakeup_worker(void)
 {
-	spin_lock(&workers.list_lock);
-	if (!list_empty(&workers.idle_list))
-		wake_up_nr(&workers.req_wait, workers.nr_req);
-	spin_unlock(&workers.list_lock);
+	struct zram_worker *worker;
+
+	if (!list_empty(&workers.idle_list)) {
+		worker = list_first_entry(&workers.idle_list,
+				struct zram_worker, list);
+		list_del(&worker->list);
+		wake_up_process(worker->task);
+	}
 }
 
 int queue_page_request(struct zram *zram, struct bio_vec *bvec,
@@ -929,9 +929,8 @@ int queue_page_request(struct zram *zram, struct bio_vec *bvec,
 	spin_lock(&workers.req_lock);
 	list_add(&page_req->list, &workers.req_list);
 	workers.nr_req++;
-	spin_unlock(&workers.req_lock);
-
 	wakeup_worker();
+	spin_unlock(&workers.req_lock);
 
 	return 0;
 }
@@ -994,9 +993,9 @@ static void run_worker(struct list_head *req_list, unsigned int nr_req)
 	spin_lock(&workers.req_lock);
 	list_splice(req_list, &workers.req_list);
 	workers.nr_req += nr_req;
+	wakeup_worker();
 	spin_unlock(&workers.req_lock);
 
-	wakeup_worker();
 }
 
 static bool __zram_make_async_request(struct zram *zram, struct bio *bio)
@@ -1013,7 +1012,9 @@ static bool __zram_make_async_request(struct zram *zram, struct bio *bio)
 		return false;
 
 	if (workers.nr_req > (ZRAMD_QUEUE_MAX * workers.nr_thread)) {
+		spin_lock(&workers.req_lock);
 		wakeup_worker();
+		spin_unlock(&workers.req_lock);
 		return false;
 	}
 
@@ -1122,56 +1123,21 @@ void page_requests_rw(struct list_head *req_list)
 
 static int zram_thread(void *data)
 {
-	DEFINE_WAIT(wait);
 	LIST_HEAD(page_list);
 	struct zram_worker *worker = data;
-
-	worker->start_jiffies = jiffies;
-
-	spin_lock(&workers.list_lock);
-	list_del(&worker->list);
-	spin_unlock(&workers.list_lock);
 
 	while (!kthread_should_stop()) {
 		bool do_fork = false;
 
 		spin_lock(&workers.req_lock);
 		if (list_empty(&workers.req_list)) {
-			long early_wakeup;
 
-			prepare_to_wait_exclusive(&workers.req_wait, &wait,
-					TASK_INTERRUPTIBLE);
-			spin_lock(&workers.list_lock);
+			__set_current_state(TASK_UNINTERRUPTIBLE);
 			list_add(&worker->list, &workers.idle_list);
-			spin_unlock(&workers.list_lock);
 			spin_unlock(&workers.req_lock);
 
-			early_wakeup = schedule_timeout(15*HZ);
-
-			finish_wait(&workers.req_wait, &wait);
-			spin_lock(&workers.list_lock);
-			list_del(&worker->list);
-			spin_unlock(&workers.list_lock);
-
-			if (early_wakeup) {
-				worker->start_jiffies = jiffies;
-				continue;
-			}
-
-			/*
-			 * Timeout means there is no request for a while.
-			 * Let's go back to the heaven. However, keep a thread
-			 * to fork new threads. Otherwise, it's hard to create
-			 * new thread in zram IO context.
-			 */
-			spin_lock(&workers.list_lock);
-			if (workers.nr_thread > 1) {
-				workers.nr_thread--;
-				spin_unlock(&workers.list_lock);
-				kfree(worker);
-				return 0;
-			}
-			spin_unlock(&workers.list_lock);
+			schedule();
+			set_current_state(TASK_RUNNING);
 			continue;
 		}
 
@@ -1194,33 +1160,24 @@ static int zram_thread(void *data)
 		cond_resched();
 	}
 
-	spin_lock(&workers.list_lock);
-	workers.nr_thread--;
-	spin_unlock(&workers.list_lock);
-	kfree(worker);
-
 	return 0;
-}
-
-static void destroy_worker(struct zram_worker *worker)
-{
-	kthread_stop(worker->task);
 }
 
 static void destroy_workers(void)
 {
 	struct zram_worker *worker;
 
-	spin_lock(&workers.list_lock);
+	spin_lock(&workers.req_lock);
 	while (!list_empty(&workers.idle_list)) {
 		worker = list_first_entry(&workers.idle_list,
 				struct zram_worker,
 				list);
-		spin_unlock(&workers.list_lock);
-		destroy_worker(worker);
-		spin_lock(&workers.list_lock);
+		kthread_stop(worker->task);
+		workers.nr_thread--;
+		list_del(&worker->list);
+		kfree(worker);
 	}
-	spin_unlock(&workers.list_lock);
+	spin_unlock(&workers.req_lock);
 	WARN_ON_ONCE(workers.nr_thread);
 
 	kmem_cache_destroy(page_cachep);
@@ -1230,11 +1187,9 @@ static void destroy_workers(void)
 static bool init_worker(void)
 {
 	INIT_LIST_HEAD(&workers.req_list);
-	init_waitqueue_head(&workers.req_wait);
 
 	INIT_LIST_HEAD(&workers.idle_list);
 	spin_lock_init(&workers.req_lock);
-	spin_lock_init(&workers.list_lock);
 
 	page_cachep = KMEM_CACHE(page_request, 0);
 	if (!page_cachep)
@@ -1270,19 +1225,18 @@ static bool create_worker(void)
 	}
 
 
-	spin_lock(&workers.list_lock);
+	spin_lock(&workers.req_lock);
 	if (workers.nr_thread >= num_online_cpus()) {
-		spin_unlock(&workers.list_lock);
+		spin_unlock(&workers.req_lock);
 		kthread_stop(worker->task);
 		kfree(worker);
 		goto out;
 	}
 
 	workers.nr_thread++;
-	list_add(&worker->list, &workers.idle_list);
-	spin_unlock(&workers.list_lock);
-
 	wake_up_process(worker->task);
+	spin_unlock(&workers.req_lock);
+
 	ret = true;
 out:
 	return ret;
@@ -1298,7 +1252,9 @@ static int zram_rw_async_page(struct zram *zram,
 		return 1;
 
 	if (workers.nr_req > (ZRAMD_QUEUE_MAX * workers.nr_thread)) {
+		spin_lock(&workers.req_lock);
 		wakeup_worker();
+		spin_unlock(&workers.req_lock);
 		return 1;
 	}
 
