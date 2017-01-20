@@ -873,11 +873,14 @@ struct zram_workers {
 	struct list_head req_list;
 	unsigned int nr_req;
 	/*
-	 * the number of existing zramd.
 	 * protected by req_lock
 	 */
-	int nr_thread;
+	int nr_thread;	/* the number of workers */
+	int nr_idle;	/* the number of idle workers */
 	struct list_head idle_list;
+
+	/* wait all workers are idle */
+	wait_queue_head_t idle_done;
 } workers;
 
 struct bio_request {
@@ -904,10 +907,11 @@ static void wakeup_worker(void)
 {
 	struct zram_worker *worker;
 
-	if (!list_empty(&workers.idle_list)) {
+	if (workers.nr_idle) {
 		worker = list_first_entry(&workers.idle_list,
 				struct zram_worker, list);
 		list_del(&worker->list);
+		workers.nr_idle--;
 		wake_up_process(worker->task);
 	}
 }
@@ -1134,6 +1138,7 @@ static int zram_thread(void *data)
 
 			__set_current_state(TASK_UNINTERRUPTIBLE);
 			list_add(&worker->list, &workers.idle_list);
+			workers.nr_idle++;
 			spin_unlock(&workers.req_lock);
 
 			schedule();
@@ -1167,7 +1172,8 @@ static void destroy_workers(void)
 {
 	struct zram_worker *worker;
 
-	spin_lock(&workers.req_lock);
+	wait_event(workers.idle_done, workers.nr_idle == workers.nr_thread);
+
 	while (!list_empty(&workers.idle_list)) {
 		worker = list_first_entry(&workers.idle_list,
 				struct zram_worker,
@@ -1177,7 +1183,7 @@ static void destroy_workers(void)
 		list_del(&worker->list);
 		kfree(worker);
 	}
-	spin_unlock(&workers.req_lock);
+
 	WARN_ON_ONCE(workers.nr_thread);
 
 	kmem_cache_destroy(page_cachep);
@@ -1190,6 +1196,7 @@ static bool init_worker(void)
 
 	INIT_LIST_HEAD(&workers.idle_list);
 	spin_lock_init(&workers.req_lock);
+	init_waitqueue_head(&workers.idle_done);
 
 	page_cachep = KMEM_CACHE(page_request, 0);
 	if (!page_cachep)
