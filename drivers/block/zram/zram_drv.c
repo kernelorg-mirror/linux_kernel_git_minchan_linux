@@ -1222,6 +1222,32 @@ static void destroy_workers(void)
 	}
 	spin_unlock(&workers.list_lock);
 	WARN_ON_ONCE(workers.nr_thread);
+
+	kmem_cache_destroy(page_cachep);
+	kmem_cache_destroy(bio_cachep);
+}
+
+static bool init_worker(void)
+{
+	INIT_LIST_HEAD(&workers.req_list);
+	init_waitqueue_head(&workers.req_wait);
+
+	INIT_LIST_HEAD(&workers.idle_list);
+	spin_lock_init(&workers.req_lock);
+	spin_lock_init(&workers.list_lock);
+
+	page_cachep = KMEM_CACHE(page_request, 0);
+	if (!page_cachep)
+		return false;
+
+	bio_cachep = KMEM_CACHE(bio_request, 0);
+	if (!bio_cachep) {
+		kmem_cache_destroy(page_cachep);
+		page_cachep = NULL;
+		return false;
+	}
+
+	return true;
 }
 
 /* create new worker thread and wake it up */
@@ -1295,14 +1321,16 @@ static int zram_rw_async_page(struct zram *zram,
 	return 1;
 }
 
+static bool init_worker(void)
+{
+	return true;
+};
+
 static bool create_worker(void)
 {
 	return true;
 }
 
-static void destroy_worker(void)
-{
-}
 static void destroy_workers(void)
 {
 }
@@ -1870,27 +1898,17 @@ static int __init zram_init(void)
 		num_devices--;
 	}
 
-	INIT_LIST_HEAD(&workers.req_list);
-	init_waitqueue_head(&workers.req_wait);
-
-	INIT_LIST_HEAD(&workers.idle_list);
-	spin_lock_init(&workers.req_lock);
-	spin_lock_init(&workers.list_lock);
+	if (!init_worker())
+		goto out_error;
 
 	if (!create_worker())
-		goto out_error;
-
-	page_cachep = KMEM_CACHE(page_request, 0);
-	if (!page_cachep)
-		goto out_error;
-	bio_cachep = KMEM_CACHE(bio_request, 0);
-	if (!bio_cachep)
 		goto out_error;
 
 	return 0;
 
 out_error:
 	destroy_devices();
+	destroy_workers();
 	return ret;
 }
 
@@ -1899,9 +1917,6 @@ static void __exit zram_exit(void)
 	destroy_devices();
 	destroy_workers();
 
-	kmem_cache_destroy(page_cachep);
-	kmem_cache_destroy(bio_cachep);
-	page_cachep = bio_cachep = NULL;
 }
 
 module_init(zram_init);
