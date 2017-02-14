@@ -97,8 +97,17 @@ struct zram_meta {
 	struct zs_pool *mem_pool;
 };
 
+struct zram;
+
+struct zram_op {
+	int (*rw_page)(struct zram *zram, struct bio_vec *bvec, u32 index,
+			int offset, bool is_write);
+	void (*make_request)(struct zram *zram, struct bio *bio);
+};
+
 struct zram {
 	struct zram_meta *meta;
+	struct zram_op *op;
 	struct zcomp *comp;
 	struct gendisk *disk;
 	/* Prevent concurrent execution of device init */

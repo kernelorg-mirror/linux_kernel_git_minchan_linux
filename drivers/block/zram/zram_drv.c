@@ -45,6 +45,15 @@ static const char *default_compressor = "lzo";
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
 
+static int zram_rw_page_sync(struct zram *zram, struct bio_vec *bvec,
+				u32 index, int offset, bool is_write);
+static void zram_make_request_sync(struct zram *zram, struct bio *bio);
+
+struct zram_op sync_op = {
+	.rw_page = zram_rw_page_sync,
+	.make_request = zram_make_request_sync,
+};
+
 static inline bool init_done(struct zram *zram)
 {
 	return zram->disksize;
@@ -818,7 +827,25 @@ static int zram_bvec_rw(struct zram *zram, struct bio_vec *bvec, u32 index,
 	return ret;
 }
 
-static void __zram_make_request(struct zram *zram, struct bio *bio)
+static int zram_rw_page_sync(struct zram *zram, struct bio_vec *bvec,
+				u32 index, int offset, bool is_write)
+{
+	int err = zram_bvec_rw(zram, bvec, index, offset, is_write);
+	/*
+	 * If I/O fails, just return error(ie, non-zero) without
+	 * calling page_endio.
+	 * It causes resubmit the I/O with bio request by upper functions
+	 * of rw_page(e.g., swap_readpage, __swap_writepage) and
+	 * bio->bi_end_io does things to handle the error
+	 * (e.g., SetPageError, set_page_dirty and extra works).
+	 */
+	if (err == 0)
+		page_endio(bvec->bv_page, is_write, 0);
+
+	return err;
+}
+
+static void zram_make_request_sync(struct zram *zram, struct bio *bio)
 {
 	int offset;
 	u32 index;
@@ -888,7 +915,7 @@ static blk_qc_t zram_make_request(struct request_queue *queue, struct bio *bio)
 		goto error;
 	}
 
-	__zram_make_request(zram, bio);
+	zram->op->make_request(zram, bio);
 	return BLK_QC_T_NONE;
 
 error:
@@ -914,7 +941,7 @@ static void zram_slot_free_notify(struct block_device *bdev,
 static int zram_rw_page(struct block_device *bdev, sector_t sector,
 		       struct page *page, bool is_write)
 {
-	int offset, err = -EIO;
+	int offset;
 	u32 index;
 	struct zram *zram;
 	struct bio_vec bv;
@@ -923,8 +950,7 @@ static int zram_rw_page(struct block_device *bdev, sector_t sector,
 
 	if (!valid_io_request(zram, sector, PAGE_SIZE)) {
 		atomic64_inc(&zram->stats.invalid_io);
-		err = -EINVAL;
-		goto out;
+		return -EINVAL;
 	}
 
 	index = sector >> SECTORS_PER_PAGE_SHIFT;
@@ -934,19 +960,7 @@ static int zram_rw_page(struct block_device *bdev, sector_t sector,
 	bv.bv_len = PAGE_SIZE;
 	bv.bv_offset = 0;
 
-	err = zram_bvec_rw(zram, &bv, index, offset, is_write);
-out:
-	/*
-	 * If I/O fails, just return error(ie, non-zero) without
-	 * calling page_endio.
-	 * It causes resubmit the I/O with bio request by upper functions
-	 * of rw_page(e.g., swap_readpage, __swap_writepage) and
-	 * bio->bi_end_io does things to handle the error
-	 * (e.g., SetPageError, set_page_dirty and extra works).
-	 */
-	if (err == 0)
-		page_endio(page, is_write, 0);
-	return err;
+	return zram->op->rw_page(zram, &bv, index, offset, is_write);
 }
 
 static void zram_reset_device(struct zram *zram)
@@ -1139,6 +1153,8 @@ static int zram_add(void)
 	zram = kzalloc(sizeof(struct zram), GFP_KERNEL);
 	if (!zram)
 		return -ENOMEM;
+
+	zram->op = &sync_op;
 
 	ret = idr_alloc(&zram_index_idr, zram, 0, 0, GFP_KERNEL);
 	if (ret < 0)
