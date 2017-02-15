@@ -21,3 +21,5 @@ config ZRAM_ASYNC_IO
 	help
 	  Use background threads to compress IO data to leverage multiple
 	  CPU power so that it can increase write throughput.
+	  To enable the feature, echo 1 > /sys/block/zramX/async before
+	  the setting disksize.

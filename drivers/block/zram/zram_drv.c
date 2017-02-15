@@ -112,10 +112,22 @@ struct zram_op async_op = {
 	.make_request = zram_make_request_async,
 };
 
+static void set_ops(struct zram *zram)
+{
+	if (zram->async)
+		zram->op = &async_op;
+	else
+		zram->op = &sync_op;
+}
+
 #else
 
 static int create_threads(void) { return 0; }
 static void destroy_threads(void) {}
+static void set_ops(struct zram *zram)
+{
+	zram->op = &sync_op;
+}
 #endif
 
 static inline bool init_done(struct zram *zram)
@@ -1039,7 +1051,9 @@ static void zram_reset_device(struct zram *zram)
 		up_write(&zram->init_lock);
 		return;
 	}
-
+#ifdef CONFIG_ZRAM_ASYNC_IO
+	zram->async = false;
+#endif
 	meta = zram->meta;
 	comp = zram->comp;
 	disksize = zram->disksize;
@@ -1093,6 +1107,7 @@ static ssize_t disksize_store(struct device *dev,
 	zram->meta = meta;
 	zram->comp = comp;
 	zram->disksize = disksize;
+	set_ops(zram);
 	set_capacity(zram->disk, zram->disksize >> SECTOR_SHIFT);
 	zram_revalidate_disk(zram);
 	up_write(&zram->init_lock);
@@ -1183,6 +1198,46 @@ static DEVICE_ATTR_WO(mem_used_max);
 static DEVICE_ATTR_RW(max_comp_streams);
 static DEVICE_ATTR_RW(comp_algorithm);
 
+#ifdef CONFIG_ZRAM_ASYNC_IO
+static ssize_t async_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	int num, ret;
+	struct zram *zram = dev_to_zram(dev);
+
+	ret = kstrtoint(buf, 0, &num);
+	if (ret < 0)
+		return ret;
+	if (num < 0)
+		return -EINVAL;
+
+	down_read(&zram->init_lock);
+	if (init_done(zram)) {
+		up_read(&zram->init_lock);
+		return -EINVAL;
+	}
+
+	if (num == 0)
+		zram->async = false;
+	else
+		zram->async = true;
+	up_read(&zram->init_lock);
+
+	return len;
+}
+
+static ssize_t async_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", zram->async);
+}
+
+static DEVICE_ATTR_RW(async);
+#endif
+
+
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
 	&dev_attr_initstate.attr,
@@ -1195,6 +1250,9 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
 	&dev_attr_debug_stat.attr,
+#ifdef CONFIG_ZRAM_ASYNC_IO
+	&dev_attr_async.attr,
+#endif
 	NULL,
 };
 
@@ -1215,11 +1273,6 @@ static int zram_add(void)
 	zram = kzalloc(sizeof(struct zram), GFP_KERNEL);
 	if (!zram)
 		return -ENOMEM;
-#ifndef CONFIG_ZRAM_ASYNC_IO
-	zram->op = &sync_op;
-#else
-	zram->op = &async_op;
-#endif
 
 	ret = idr_alloc(&zram_index_idr, zram, 0, 0, GFP_KERNEL);
 	if (ret < 0)
@@ -1763,6 +1816,7 @@ out:
 	destroy_threads();
 	return ret;
 }
+
 #endif
 
 static int __init zram_init(void)
