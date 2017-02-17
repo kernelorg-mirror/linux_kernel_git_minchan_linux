@@ -694,7 +694,7 @@ compress_again:
 
 		handle = zs_malloc(meta->mem_pool, clen,
 				GFP_NOIO | __GFP_HIGHMEM |
-				__GFP_MOVABLE);
+				__GFP_MOVABLE | __GFP_NOWARN);
 		if (handle)
 			goto compress_again;
 
